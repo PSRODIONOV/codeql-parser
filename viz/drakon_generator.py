@@ -377,6 +377,10 @@ class _Layouter:
         """
         for node in sorted(nodes, key=lambda n: n["line_start"]):
             st = node["stmt_type"]
+            if st in ("case", "default"):
+                # Метки границ ветвей switch, не собственные блоки — см.
+                # комментарий в _layout_leaf.
+                continue
             if st == "if":
                 prev_id, y = self._layout_if(node, cx, y, exit_id, loop_back_id,
                                              loop_exit_id, prev_id)
@@ -434,11 +438,19 @@ class _Layouter:
                 self.edges.append(_PE(src=nid, dst=target, label="", lcolor=_CONN,
                                       route="LB", rail_x=r, no_marker=True))
 
-        # Recurse into children (rare for leaf types, but possible)
+        # Recurse into children (rare for leaf types, but possible).
+        # case/default — НЕ собственные блоки (метки границ ветвей switch,
+        # см. probe_points.ql/function_flow_v2.ql), пропускаем их: иначе на
+        # схеме появлялись бы пустые блоки с текстом "case ..."/"default"
+        # посреди обычной последовательности (минимальный безопасный фикс
+        # для switch — без построения настоящего N-арного ветвления в
+        # каноническом DRAKON-layout, см. обсуждение).
         if node["children"]:
             ch_sorted = sorted(node["children"], key=lambda c: c["line_start"])
             prev_id = nid
             for c in ch_sorted:
+                if c["stmt_type"] in ("case", "default"):
+                    continue
                 prev_id, end_y = self._layout_leaf(c, cx, end_y, prev_id,
                                                    loop_back_id, loop_exit_id, exit_id)
 
@@ -1211,7 +1223,7 @@ class DrakonGenerator:
                 cand = nodes[j]
                 if (cand["line_start"] <= child["line_start"]
                         and cand["line_end"] >= child["line_end"]
-                        and cand["stmt_type"] in ("if", "while", "for", "do", "code", "try")):
+                        and cand["stmt_type"] in ("if", "while", "for", "do", "code", "try", "switch")):
                     if best_parent is None or cand["line_start"] > best_parent["line_start"]:
                         best_parent = cand
             if best_parent:
