@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./third-party/**)",
+      "Glob(./third-party/**)",
+      "Grep(./third-party/**)"
+    ]
+  }
+}

@@ -1,0 +1,3 @@
+/mnt/f/codeql-parser/examples/test-projects/small-projects/test-project-cpp/CMakeFiles/test-project.dir
+/mnt/f/codeql-parser/examples/test-projects/small-projects/test-project-cpp/CMakeFiles/edit_cache.dir
+/mnt/f/codeql-parser/examples/test-projects/small-projects/test-project-cpp/CMakeFiles/rebuild_cache.dir

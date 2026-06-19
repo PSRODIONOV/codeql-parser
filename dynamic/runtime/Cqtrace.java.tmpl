@@ -1,0 +1,123 @@
+package @PACKAGE@;
+
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.Writer;
+import java.lang.management.ManagementFactory;
+import java.text.SimpleDateFormat;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+
+/**
+ * Рантайм датчиков динамического анализа (Java).
+ *
+ * Cqtrace.hit(fo, br) — срабатывание датчика: пишет "fo:br".
+ *   Вход ФО: hit(fo,0); Выход ФО: hit(fo,-1) (в finally); Ветвь: hit(fo,N).
+ *
+ * Coverage-строки `fo:br` — анти-спам (№1,2,4,8…). На выходе из вызова ФО также
+ * пишутся маршруты: "R fo:b1>b2>..." (ветви) и "C fo:fo>c1>c2>..." (вызовы);
+ * подряд идущие повторы схлопываются (циклы/рекурсия), уникальные — 1,2,4,8… раз.
+ * Стек кадров — ThreadLocal (корректно при многопоточности).
+ * Трассы: <user.home>/java-<timestamp>-<pid>.log, ротация 100 МБ.
+ */
+public final class Cqtrace {
+    private static final long LIMIT = 100L * 1024 * 1024;
+    private static final String LANG = "java";
+    private static final HashMap<Long, Long> cnt = new HashMap<>();
+    private static final HashMap<String, Long> rsig = new HashMap<>();
+    private static final Object lock = new Object();
+    private static Writer fp = null;
+    private static long bytes = 0;
+
+    private Cqtrace() { }
+
+    private static final class Frame {
+        final int fo;
+        final ArrayList<Integer> br = new ArrayList<>();
+        final ArrayList<Integer> cl = new ArrayList<>();
+        Frame(int fo) { this.fo = fo; this.cl.add(fo); }
+    }
+
+    private static final ThreadLocal<ArrayDeque<Frame>> stack =
+            ThreadLocal.withInitial(ArrayDeque::new);
+
+    private static void rotate() throws IOException {
+        String ts = new SimpleDateFormat("yyyyMMdd-HHmmss").format(new Date());
+        String home = System.getProperty("user.home");
+        String pidProp = ManagementFactory.getRuntimeMXBean().getName();
+        long pid;
+        try { pid = Long.parseLong(pidProp.split("@")[0]); } catch (NumberFormatException e) { pid = 0L; }
+        if (fp != null) fp.close();
+        fp = new BufferedWriter(new FileWriter(
+                home + File.separator + LANG + "-" + ts + "-" + pid + ".log", true));
+        bytes = 0;
+    }
+
+    /** Запись строки. Предполагает synchronized(lock). */
+    private static void writeLine(String s) {
+        try {
+            if (fp == null || bytes >= LIMIT) rotate();
+            fp.write(s);
+            fp.flush();
+            bytes += s.length();
+        } catch (IOException e) {
+            /* трассировка не должна ронять программу */
+        }
+    }
+
+    /** Выгрузка маршрута с анти-спамом по сигнатуре (1,2,4,8…). */
+    private static void emit(char tag, int fo, List<Integer> seq) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < seq.size(); i++) {
+            if (i > 0) sb.append('>');
+            sb.append(seq.get(i));
+        }
+        String body = sb.toString();
+        String key = tag + Integer.toString(fo) + ":" + body;
+        synchronized (lock) {
+            long c = rsig.getOrDefault(key, 0L) + 1;
+            rsig.put(key, c);
+            if ((c & (c - 1)) != 0) return;
+            writeLine(tag + " " + fo + ":" + body + "\n");
+        }
+    }
+
+    private static void routeEvent(int fo, int br) {
+        ArrayDeque<Frame> st = stack.get();
+        if (br == 0) {                          // вход в ФО
+            Frame parent = st.peek();
+            if (parent != null) {               // записать как вызов в кадре-родителе
+                List<Integer> cl = parent.cl;
+                if (cl.isEmpty() || cl.get(cl.size() - 1) != fo) cl.add(fo);
+            }
+            st.push(new Frame(fo));
+        } else if (br == -1) {                  // выход — выгрузка обоих маршрутов
+            Frame fr = st.poll();
+            if (fr != null) { emit('R', fr.fo, fr.br); emit('C', fr.fo, fr.cl); }
+        } else {                                // ветвь — дописать (без подряд-повторов)
+            Frame fr = st.peek();
+            if (fr != null) {
+                List<Integer> b = fr.br;
+                if (b.isEmpty() || b.get(b.size() - 1) != br) b.add(br);
+            }
+        }
+    }
+
+    public static void hit(int fo, int br) {
+        routeEvent(fo, br);                      // буфер маршрута — всегда (поток-локально)
+        synchronized (lock) {
+            long key = (((long) fo) << 32) ^ (br & 0xffffffffL);
+            long c = cnt.getOrDefault(key, 0L) + 1;
+            cnt.put(key, c);
+            if ((c & (c - 1)) != 0) {
+                return;                          // не степень двойки → пропуск coverage-строки
+            }
+            writeLine(fo + ":" + br + "\n");
+        }
+    }
+}

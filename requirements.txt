@@ -1,0 +1,6 @@
+# Все зависимости устанавливаются локально:
+#   pip install --target=python-packages pillow
+#
+# Node.js размещён в nodejs/node.exe
+# elkjs размещён в node_modules/
+pillow
