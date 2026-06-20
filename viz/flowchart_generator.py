@@ -1888,16 +1888,30 @@ class FlowchartGenerator:
                     if n.get("branch_num")
                 ]
                 # Добавить else-ветви из IfStmt (else — не отдельный Stmt в CodeQL AST,
-                # поэтому генерируем отдельную запись в инвентаре из данных else_line)
+                # поэтому генерируем отдельную запись в инвентаре из данных else_line).
+                # ВАЖНО: else-if (when else_line указывает на строку вложенного if)
+                # НЕ даёт записи "else" — это самостоятельная if-ветвь, уже учтённая
+                # выше как отдельный узел. else_line у такого if нужен лишь
+                # перечислителю маршрутов (_arms) для деления на «да»/«нет».
+                _if_lines = {int(x.get("line_start", x.get("line", 0)) or 0)
+                             for x in _filt if x.get("stmt_type") == "if"}
                 _else_entries = []
                 for n in _filt:
-                    if n.get("stmt_type") == "if" and int(n.get("else_line", "0") or 0) > 0:
-                        _else_entries.append({
-                            "num": n.get("branch_num"),
-                            "type": "else",
-                            "line": int(n.get("else_line", "0") or 0),
-                            "line_end": int(n.get("else_line_end", "0") or 0),
-                        })
+                    if n.get("stmt_type") == "if":
+                        _el = int(n.get("else_line", "0") or 0)
+                        _ln = int(n.get("line_start", n.get("line", 0)) or 0)
+                        # else-if: else_line указывает на ДРУГОЙ (вложенный) if,
+                        # а не на сам n. Условие _el != _ln отделяет однострочный
+                        # `if (...) op1; else op2;` (где else на той же строке, что
+                        # и сам if) — это ПЛОСКИЙ else, запись нужна.
+                        _is_else_if = _el > 0 and _el != _ln and _el in _if_lines
+                        if _el > 0 and not _is_else_if:        # плоский else
+                            _else_entries.append({
+                                "num": n.get("branch_num"),
+                                "type": "else",
+                                "line": _el,
+                                "line_end": int(n.get("else_line_end", "0") or 0),
+                            })
                 branch_inventory_by_func[_fkey].extend(_else_entries)
         if log:
             log(f"[МАРШРУТЫ] готово: {_nroutes_total} для {_nri} ФО "

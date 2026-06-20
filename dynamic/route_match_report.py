@@ -44,14 +44,50 @@ def is_instrumented(btype: str, outcome: str) -> bool:
     return False
 
 
+def _collapse_cycles(seq):
+    """Схлопывает подряд идущие повторы блоков в последовательности ветвей —
+    приводит ФАКТИЧЕСКИЙ маршрут (рантайм пишет каждую итерацию цикла) к ОДНОМУ
+    проходу, как в статическом перечислителе маршрутов. Примеры:
+        (1,2,1,2,1,2) -> (1,2)     # цикл из двух ветвей, 3 итерации
+        (1,1,1)       -> (1)       # одна ветвь, 3 итерации
+        (1,2,3,2,3)   -> (1,2,3)   # вложенный повтор
+    Итеративно до стабилизации; всегда оставляем ОДИН экземпляр блока, начиная
+    с самого раннего и короткого (детерминированно). Маршруты короткие
+    (≤ сотен элементов), поэтому O(n²) приемлемо.
+
+    ПРИМ.: если итерации цикла проходят РАЗНЫЕ ветви (напр. (1,3,1,2) —
+    continue на первой, выход на второй), это не повтор блока и НЕ схлопывается —
+    такой маршрут останется «непредусмотренным» (одного статического прохода для
+    него действительно нет)."""
+    s = list(seq)
+    changed = True
+    while changed:
+        changed = False
+        n = len(s)
+        for i in range(n):
+            for L in range(1, (n - i) // 2 + 1):
+                block = s[i:i + L]
+                j = i + L
+                while j + L <= n and s[j:j + L] == block:
+                    j += L
+                if j > i + L:                      # блок повторился ≥1 раза подряд
+                    s = s[:i + L] + s[j:]          # оставить один экземпляр
+                    changed = True
+                    break
+            if changed:
+                break
+    return tuple(s)
+
+
 def _branch_sig(route_str: str):
-    """route_str → кортеж номеров инструментированных ветвей по порядку."""
+    """route_str → кортеж номеров инструментированных ветвей по порядку
+    (с нормализацией циклов — см. _collapse_cycles)."""
     seq = []
     for tok in route_str.split("->"):
         m = _TOKEN.match(tok.strip())
         if m and is_instrumented(m.group(1), m.group(3)):
             seq.append(int(m.group(2)))
-    return tuple(seq)
+    return _collapse_cycles(seq)
 
 
 def _call_sig(route_str: str):
@@ -100,6 +136,11 @@ def read_actual(paths):
                     continue
                 seq = tuple(int(x) for x in seq_s.split(">") if x.strip().lstrip("-").isdigit())
                 if tag == "R ":
+                    # Нормализация циклов: каждую итерацию цикла рантайм пишет
+                    # отдельно (1>2>1>2>…) — схлопываем до одного прохода (1>2),
+                    # как в статическом маршруте. Разные счётчики итераций
+                    # суммируются в один структурный маршрут.
+                    seq = _collapse_cycles(seq)
                     br[fo][seq] += 1
                     if seq:
                         any_branch = True
