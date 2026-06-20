@@ -553,8 +553,15 @@ def generate_static_reports(project: ProjectDB,
     # Сигнатурный анализ
     if _sel(selected, CHECK_SIGNATURE):
         meta = project.get_project()
-        report.add_signature_analysis(raw["signature"], func_data, file_by_abs_path, {},
-                                      rule_source=f"{meta.get('language', 'cpp')}-queries")
+        # Снимок исходников из src.zip БД — для колонки «Фрагмент кода»
+        # (codeql не нужен, читается из архива). Идентично пути CLI (main.py),
+        # чтобы GUI и CLI давали один и тот же отчёт по одной БД.
+        lang = meta.get("language", "cpp")
+        source_by_base = (read_source_snapshot(meta["codeql_db_path"])
+                          if lang not in ("php", "sql") else {})
+        report.add_signature_analysis(raw["signature"], func_data, file_by_abs_path,
+                                      source_by_base,
+                                      rule_source=f"{lang}-queries")
         report.add_signature_summary(raw["signature"])
         _log(log, "Сигнатурный анализ сохранён.")
 
