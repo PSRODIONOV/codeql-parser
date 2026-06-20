@@ -142,23 +142,7 @@ def get_sig_line(sig_row: dict) -> int:
 
 # ── Фикстуры ────────────────────────────────────────────────────────────────
 
-@pytest.fixture(scope="session")
-def cpp_fo():
-    return load_report("cpp", "Перечень_ФО(процедур_функций).csv")
-
-@pytest.fixture(scope="session")
-def cpp_sig():
-    return sig_findings("cpp")
-
-@pytest.fixture(scope="session")
-def cpp_routes():
-    return load_routes("cpp")
-
-@pytest.fixture(scope="session")
-def cpp_src():
-    return _src_dir("test-project-cpp")
-
-# ── Проект ветвей (test-project-cpp-branches) ────────────────────────────────
+# ── Проект ветвей (test-project-cpp-branches) — единый C/C++ регресс ─────────
 # Золотые отчёты: reports/small-projects/cpp-branches/ (пути в колонке 'Файл'
 # нормализованы до basename). Регрессия для работы с ветвями: определение
 # (else-if, switch/case, пустой then, одиночные/однострочные формы, негативы),
@@ -175,6 +159,10 @@ def cpp_branches_coverage():
 @pytest.fixture(scope="session")
 def cpp_branches_sensors():
     return load_report("cpp-branches", "Карта_датчиков.csv")
+
+@pytest.fixture(scope="session")
+def cpp_branches_signature():
+    return load_report("cpp-branches", "Сигнатурный_анализ_кода.csv")
 
 @pytest.fixture(scope="session")
 def cpp_branches_src():

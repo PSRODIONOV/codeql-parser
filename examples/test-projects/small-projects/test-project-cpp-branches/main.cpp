@@ -9,6 +9,8 @@
 #include "oneline_demo.h"
 #include "advanced_demo.h"
 #include "negative_demo.h"
+#include "unsafe_demo.h"
+#include "macro_demo.h"
 #include "pipeline.h"
 
 // main вызывает все функции так, чтобы КАЖДАЯ отслеживаемая ветвь
@@ -109,6 +111,12 @@ int main() {
     std::cout << "retry_goto(3)        = " << retry_goto(3) << "\n";
     std::cout << "macro_control(5)     = " << macro_control(5) << "\n";
     std::cout << "macro_control(-5)    = " << macro_control(-5) << "\n";
+
+    // ---- unsafe_demo (опасные конструкции для сигнатурного анализа) ----
+    run_unsafe("demo");
+
+    // ---- macro_demo (ФО из макроса: целиком / только тело) ----
+    std::cout << "call_macro_demo      = " << call_macro_demo() << "\n";
 
     // ---- pipeline (маршруты вызовов) ----
     Pipeline pipe(3);

@@ -405,7 +405,11 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
                                if r.get("function_name", "") not in excluded_names]
                 raw["flow"] = [r for r in raw["flow"]
                                if r.get("func_name", "") not in excluded_names]
-                _log(log, f"[ФИЛЬТР] ИО/ветви: исключены данные из "
+                # Опасные конструкции (ПОК) исключённого ФО тоже убираем:
+                # если ФО исключён, не должно остаться ни ветвей, ни ИО, ни ПОК.
+                raw["signature"] = [r for r in raw["signature"]
+                                    if r.get("function_name", "") not in excluded_names]
+                _log(log, f"[ФИЛЬТР] ИО/ветви/ПОК: исключены данные из "
                     f"{len(excluded_names)} макро-ФО")
 
     ts = time.perf_counter()

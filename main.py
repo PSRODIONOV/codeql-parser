@@ -218,8 +218,12 @@ def main():
         # Фильтруем flow_data — ветви из удалённых ФО
         flow_data = [r for r in flow_data
                      if r.get("func_name", "") not in excluded_func_names]
+        # Опасные конструкции (ПОК) удалённых ФО тоже убираем — исключённый ФО
+        # не должен оставлять следов ни в ветвях, ни в ИО, ни в сигнатурном анализе.
+        sig_data = [r for r in sig_data
+                    if r.get("function_name", "") not in excluded_func_names]
         print(f"[ИО] Исключено {len(excluded_func_names)} ФО (макро-имена) -> "
-              f"ИО из этих ФО удалены из отчётов")
+              f"ИО/ветви/ПОК из этих ФО удалены из отчётов")
     report.add_signature_analysis(sig_data, func_data, file_by_abs_path, source_by_base,
                                   rule_source=f"{args.language}-queries")
     report.add_signature_summary(sig_data)

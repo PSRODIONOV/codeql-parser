@@ -13,5 +13,7 @@ add_executable(branches
     oneline_demo.cpp
     advanced_demo.cpp
     negative_demo.cpp
+    unsafe_demo.cpp
+    macro_demo.cpp
     pipeline.cpp
 )
