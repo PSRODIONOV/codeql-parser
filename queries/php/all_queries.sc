@@ -356,7 +356,7 @@ import java.io.{BufferedWriter, FileWriter}
       }
 
     // ────────────────────────────────────────────────────────────────────────
-    // 9. function_flow_v2: control structures per function
+    // 9. function_flow: control structures per function
     //
     // lineNumberEnd was removed from Joern 4.x CPG schema for most node types.
     // lineEnd() approximates it as the max lineNumber in the AST subtree.

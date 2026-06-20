@@ -31,7 +31,7 @@
 │   ├── report_generator.py  project_db.py  project_runner.py
 ├── viz/                     # Визуализация: блок-схемы и графы
 │   ├── flowchart_generator.py  elk_generator.py  drakon_generator.py
-│   ├── axis_layout.py  grid_layout.py  graph_builder.py  func_key.py
+│   ├── axis_layout.py  graph_builder.py  func_key.py
 │   └── elk_layout.js        #   раскладка ELK (Node)
 ├── gui/                     # Графический интерфейс (PyQt5)
 │   └── gui_project.py  gui_widgets.py  gui_styles.py

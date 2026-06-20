@@ -17,7 +17,7 @@ QUERY_MAP: Dict[str, str] = {
     "arg_flow":   "arg_flow.ql",
     "file_flow":  "file_flow.ql",
     "signature":  "signature_analysis.ql",
-    "flow":       "function_flow_v2.ql",
+    "flow":       "function_flow.ql",
     # Геометрия точек вставки датчиков (вход/выход ФО + ветви) для динамической
     # инструментации. Собирается в составе сырых данных статики и сохраняется в
     # project.db (раздел "probe"), чтобы инструментатор НЕ делал отдельный запрос
@@ -312,9 +312,6 @@ class CodeQLAnalyzer:
         """Возвращает список файлов проекта, участвующих в сборке."""
         return self._run_query("files.ql", "files")
 
-    def get_redundant_objects(self) -> List[Dict[str, str]]:
-        return self._run_query("redundant_objects.ql", "redundant")
-
     def get_info_objects(self) -> List[Dict[str, str]]:
         return self._run_query("info_objects.ql", "info")
 
@@ -330,7 +327,7 @@ class CodeQLAnalyzer:
         _prio = {"if": 10, "for": 10, "while": 10, "do": 10, "try": 10,
                  "return": 5, "throw": 5, "break": 5, "continue": 5,
                  "other": 1, "expr": 1}
-        data = self._run_query("function_flow_v2.ql", "flow")
+        data = self._run_query("function_flow.ql", "flow")
         best: Dict[Any, Dict[str, str]] = {}
         for item in data:
             key = (item["func_name"], item.get("func_file", ""), item["stmt_id"])
@@ -363,13 +360,6 @@ class CodeQLAnalyzer:
     def run_all_queries(self, max_workers: int = 0) -> Dict[str, List[Dict[str, str]]]:
         """Запускает все запросы (max_workers игнорируется — используется батч)."""
         return self.run_batch_queries()
-
-    def get_function_calls(self) -> List[Dict[str, str]]:
-        """Возвращает список всех вызовов функций: caller -> callee"""
-        return self._run_query("function_calls.ql", "calls")
-
-    def get_redundant_info_objects(self) -> List[Dict[str, str]]:
-        return self._run_query("redundant_info_objects.ql", "redundant_info")
 
     def get_arg_flow(self) -> List[Dict[str, str]]:
         """Возвращает потоки аргумент→параметр для всех вызовов функций."""

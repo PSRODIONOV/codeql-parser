@@ -664,7 +664,7 @@ class FlowchartGenerator:
         elif stmt_type == "try":
             dot.node(stmt_id, label, shape=node_shape)
 
-            # Разделяем children на try и catch части используя поле in_catch (задано в function_flow_v2.ql)
+            # Разделяем children на try и catch части используя поле in_catch (задано в function_flow.ql)
             try_ch = sorted([c for c in children if not int(c.get("in_catch", "0") or 0)],
                             key=lambda c: c["line_start"])
             catch_ch = sorted([c for c in children if int(c.get("in_catch", "0") or 0)],

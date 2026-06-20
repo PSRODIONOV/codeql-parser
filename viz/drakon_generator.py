@@ -440,7 +440,7 @@ class _Layouter:
 
         # Recurse into children (rare for leaf types, but possible).
         # case/default — НЕ собственные блоки (метки границ ветвей switch,
-        # см. probe_points.ql/function_flow_v2.ql), пропускаем их: иначе на
+        # см. probe_points.ql/function_flow.ql), пропускаем их: иначе на
         # схеме появлялись бы пустые блоки с текстом "case ..."/"default"
         # посреди обычной последовательности (минимальный безопасный фикс
         # для switch — без построения настоящего N-арного ветвления в

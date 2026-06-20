@@ -31,7 +31,7 @@ RAW_SCHEMA: Dict[str, List[str]] = {
     "q_data":       ["function_name", "variable_name", "func_file", "access_line", "access_type"],
     "q_arg_flow":   ["caller_name", "callee_name", "caller_var", "param_var", "caller_file", "call_line"],
     "q_file_flow":  ["function_name", "func_file", "file_name", "access_type", "access_line"],
-    # func_file обязателен: function_flow_v2.ql его возвращает, дедупликация
+    # func_file обязателен: function_flow.ql его возвращает, дедупликация
     # в codeql_analyzer и группировка операторов по (имя, файл) в генераторах
     # на него опираются — без него одноимённые функции сливаются.
     "q_flow":       ["func_name", "func_file", "stmt_id", "line_start", "line_end",

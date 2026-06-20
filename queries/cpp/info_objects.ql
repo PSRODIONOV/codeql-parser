@@ -27,7 +27,7 @@ predicate isProjectFile(File file) {
  * Имя переменной для перечня ИО. У глобальных переменных и полей классов есть
  * getQualifiedName(); у локальных переменных и параметров его нет, поэтому
  * синтезируем "<функция>::<имя>", чтобы ключ был стабильным и совпадал между
- * запросами (info_objects / data_matrix / redundant_info_objects).
+ * запросами (info_objects / data_matrix).
  */
 string varName(Variable v) {
   exists(v.getQualifiedName()) and result = v.getQualifiedName()
