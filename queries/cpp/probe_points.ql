@@ -246,7 +246,11 @@ predicate probe(
     kind    = "branch" and
     func    = sw.getEnclosingFunction().getQualifiedName() and
     file    = sc.getFile().getAbsolutePath() and
-    refLine = sw.getLocation().getStartLine() and
+    // refLine — строка САМОЙ метки case/default (а не switch): по ней
+    // инструментатор ищет номер ветви в Перечень_ветвей (где каждая метка —
+    // отдельная строка). Раньше тут была строка switch, и ВСЕ метки получали
+    // номер первой ветви (br=1) — см. weekday_kind в test-project-cpp-branches.
+    refLine = sc.getLocation().getStartLine() and
     insLine = sc.getLocation().getEndLine() and
     insCol  = sc.getLocation().getEndColumn() + 1 and
     hasBlock = 2 and
@@ -283,5 +287,12 @@ from string kind, string func, string file, int refLine,
      int insLine, int insCol, int hasBlock, string btype,
      int endLine, int endCol
 where probe(kind, func, file, refLine, insLine, insCol, hasBlock, btype, endLine, endCol)
-select kind, func, file, refLine, insLine, insCol, hasBlock, btype, endLine, endCol
-order by file, insLine, insCol
+// as-алиасы (snake_case) — чтобы при сборе в составе сырых данных (раздел
+// "probe" в project.db) заголовки CSV совпадали со схемой RAW_SCHEMA["q_probe"]
+// и инструментатор читал геометрию из project.db БЕЗ отдельного запроса.
+// Порядок колонок не меняется — позиционный парсинг (fallback в instrument_cpp.py)
+// продолжает работать.
+select kind, func, file, refLine as ref_line,
+       insLine as ins_line, insCol as ins_col, hasBlock as has_block,
+       btype, endLine as end_line, endCol as end_col
+order by file, ins_line, ins_col

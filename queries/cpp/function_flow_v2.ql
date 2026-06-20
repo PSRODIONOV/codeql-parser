@@ -118,39 +118,49 @@ string getStmtLabel(Stmt s) {
   s instanceof ExprStmt and not s.(ExprStmt).getExpr() instanceof ThrowExpr and result = s.toString()
 }
 
+// "else if" — это IfStmt в позиции else. Он НЕ является плоской else-веткой:
+// это самостоятельное ветвление (своя строка в выводе, см. условие where).
+// Поэтому для родительского if такой else НЕ считается else-веткой (иначе
+// flowchart_generator синтезировал бы фантомную "else"-запись, дублирующую
+// уже существующий if-узел else if). Плоский else (блок или одиночный
+// оператор, но НЕ IfStmt) — считается как и раньше.
+predicate hasPlainElse(IfStmt s) {
+  exists(s.getElse()) and not s.getElse() instanceof IfStmt
+}
+
 /** Строка начала else/catch-ветки, иначе 0 */
 int getElseLine(Stmt s) {
-  s instanceof IfStmt and exists(s.(IfStmt).getElse()) and
+  hasPlainElse(s) and
   result = s.(IfStmt).getElse().getLocation().getStartLine()
   or
   s instanceof TryStmt and
   result = min(Handler h | h.getTryStmt() = s | h.getLocation().getStartLine())
   or
-  not (s instanceof IfStmt and exists(s.(IfStmt).getElse())) and
+  not hasPlainElse(s) and
   not s instanceof TryStmt and
   result = 0
 }
 
 /** Строка конца else-ветки, иначе 0 */
 int getElseLineEnd(Stmt s) {
-  s instanceof IfStmt and exists(s.(IfStmt).getElse()) and
+  hasPlainElse(s) and
   result = s.(IfStmt).getElse().getLocation().getEndLine()
   or
-  not (s instanceof IfStmt and exists(s.(IfStmt).getElse())) and
+  not hasPlainElse(s) and
   result = 0
 }
 
 /** else-ветва в { } (1) или одиночный оператор (0), иначе 0 */
 int getElseHasBlock(Stmt s) {
-  s instanceof IfStmt and exists(s.(IfStmt).getElse()) and
+  hasPlainElse(s) and
   s.(IfStmt).getElse() instanceof BlockStmt and
   result = 1
   or
-  s instanceof IfStmt and exists(s.(IfStmt).getElse()) and
+  hasPlainElse(s) and
   not s.(IfStmt).getElse() instanceof BlockStmt and
   result = 0
   or
-  not (s instanceof IfStmt and exists(s.(IfStmt).getElse())) and
+  not hasPlainElse(s) and
   result = 0
 }
 
@@ -213,10 +223,12 @@ where
   not isMacroGeneratedControl(s) and
   // То же для case/default, чей родительский switch порождён макросом.
   not (s instanceof SwitchCase and
-       exists(SwitchStmt sw | s.(SwitchCase).getSwitchStmt() = sw | sw.getExpr().isInMacroExpansion())) and
-  // Исключаем else-ветви, которые являются IfStmt (else if) —
-  // они обрабатываются как отдельный IfStmt, иначе дублируются.
-  not (exists(Stmt parent | parent instanceof IfStmt and s = parent.(IfStmt).getElse() and s instanceof IfStmt))
+       exists(SwitchStmt sw | s.(SwitchCase).getSwitchStmt() = sw | sw.getExpr().isInMacroExpansion()))
+  // ПРИМ.: else-if (IfStmt в позиции else) НЕ исключается — это
+  // самостоятельное ветвление, его нужно нумеровать как отдельный if (иначе
+  // в Перечень_ветвей теряются все звенья цепочки кроме первого, а
+  // инструментатор пропускает их датчики). Дублирования с "else" нет:
+  // getElseLine/hasPlainElse не считают else-if плоской else-веткой.
 select
   f.getQualifiedName() as func_name,
   f.getFile().getAbsolutePath() as func_file,

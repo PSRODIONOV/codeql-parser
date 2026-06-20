@@ -334,6 +334,10 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
     if needs_arg_flow:  _needed.append("arg_flow")
     if needs_file_flow: _needed.append("file_flow")
     if needs_flow:      _needed.append("flow")
+    # Геометрия точек вставки датчиков для инструментации (C/C++): собираем в
+    # составе сырых данных и сохраняем в project.db, чтобы инструментатор брал её
+    # оттуда, а не делал отдельный запрос probe_points.ql (см. instrument_cpp.py).
+    if language in ("cpp", "c"): _needed.append("probe")
 
     _LABELS: Dict[str, tuple] = {
         "functional": ("ФО",      "Сбор функциональных объектов"),
@@ -345,6 +349,7 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
         "arg_flow":   ("МАТРИЦЫ", "Аргументные потоки"),
         "file_flow":  ("МАТРИЦЫ", "Обращения к файлам"),
         "flow":       ("ПОТОК",   "Управляющие конструкции (if/for/while/...)"),
+        "probe":      ("ДАТЧИКИ", "Геометрия точек вставки (вход/выход/ветви)"),
     }
 
     def _on_query_done(name: str, count: int):

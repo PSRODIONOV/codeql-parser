@@ -78,11 +78,29 @@ def test_raw_data_roundtrip(proj):
 
 
 def test_all_datasets_known():
-    # ключи наборов должны совпадать с тем, что использует main.py / project_runner
+    # ключи наборов должны совпадать с тем, что использует main.py / project_runner.
+    # 'probe' — геометрия точек вставки датчиков (probe_points.ql), собирается в
+    # сырые данные для инструментации без отдельного запроса (см. instrument_cpp.py).
     assert set(DATASET_TABLE) == {
         "functional", "info", "files", "signature", "control",
-        "data", "arg_flow", "file_flow", "flow",
+        "data", "arg_flow", "file_flow", "flow", "probe",
     }
+
+
+def test_probe_dataset_roundtrip(proj):
+    """Геометрия точек вставки датчиков (раздел 'probe') сохраняется/читается
+    из project.db 1:1 — инструментатор берёт её отсюда без отдельного запроса."""
+    probe = [
+        {"kind": "entry", "func": "f", "file": "a.cpp", "ref_line": "5",
+         "ins_line": "5", "ins_col": "10", "has_block": "1", "btype": "-",
+         "end_line": "9", "end_col": "1"},
+        {"kind": "branch", "func": "f", "file": "a.cpp", "ref_line": "6",
+         "ins_line": "6", "ins_col": "16", "has_block": "0", "btype": "if",
+         "end_line": "6", "end_col": "20"},
+    ]
+    proj.save_raw_data({"probe": probe})
+    loaded = proj.load_raw_data()
+    assert loaded["probe"] == probe
 
 
 def test_derived_roundtrip(proj):

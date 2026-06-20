@@ -18,6 +18,11 @@ QUERY_MAP: Dict[str, str] = {
     "file_flow":  "file_flow.ql",
     "signature":  "signature_analysis.ql",
     "flow":       "function_flow_v2.ql",
+    # Геометрия точек вставки датчиков (вход/выход ФО + ветви) для динамической
+    # инструментации. Собирается в составе сырых данных статики и сохраняется в
+    # project.db (раздел "probe"), чтобы инструментатор НЕ делал отдельный запрос
+    # к БД, а брал геометрию из сырых данных (см. instrument_cpp.py).
+    "probe":      "probe_points.ql",
 }
 
 

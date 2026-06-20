@@ -36,6 +36,11 @@ RAW_SCHEMA: Dict[str, List[str]] = {
     # на него опираются — без него одноимённые функции сливаются.
     "q_flow":       ["func_name", "func_file", "stmt_id", "line_start", "line_end",
                      "stmt_type", "stmt_label", "else_line", "in_catch"],
+    # Геометрия точек вставки датчиков (probe_points.ql): вход/выход ФО и ветви.
+    # Хранится в сырых данных, чтобы инструментатор читал её из project.db, а не
+    # выполнял отдельный запрос к CodeQL-БД (см. instrument_cpp.py).
+    "q_probe":      ["kind", "func", "file", "ref_line", "ins_line", "ins_col",
+                     "has_block", "btype", "end_line", "end_col"],
 }
 
 # Сопоставление имени набора в коде (main.py) ↔ таблицы БД
@@ -49,6 +54,7 @@ DATASET_TABLE = {
     "arg_flow":    "q_arg_flow",
     "file_flow":   "q_file_flow",
     "flow":        "q_flow",
+    "probe":       "q_probe",
 }
 
 PROJECT_FILE = "project.db"
@@ -78,7 +84,15 @@ class ProjectDB:
             changed = False
             for table, cols in RAW_SCHEMA.items():
                 if table not in existing:
-                    continue  # таблицы создаст _create_schema при create()
+                    # Новая raw-таблица (напр. q_probe), которой не было в БД,
+                    # созданной прежней версией: создаём, иначе load_raw_data
+                    # упадёт на SELECT из несуществующей таблицы.
+                    col_defs = ", ".join(f'"{c}" TEXT' for c in cols)
+                    self.conn.execute(
+                        f'CREATE TABLE IF NOT EXISTS "{table}" '
+                        f'(row_id INTEGER PRIMARY KEY, {col_defs})')
+                    changed = True
+                    continue
                 have = {r["name"] for r in self.conn.execute(f'PRAGMA table_info("{table}")')}
                 for col in cols:
                     if col not in have:

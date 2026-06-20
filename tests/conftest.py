@@ -158,6 +158,28 @@ def cpp_routes():
 def cpp_src():
     return _src_dir("test-project-cpp")
 
+# ── Проект ветвей (test-project-cpp-branches) ────────────────────────────────
+# Золотые отчёты: reports/small-projects/cpp-branches/ (пути в колонке 'Файл'
+# нормализованы до basename). Регрессия для работы с ветвями: определение
+# (else-if, switch/case, пустой then, одиночные/однострочные формы, негативы),
+# карта датчиков (нумерация case) и покрытие (все ветви исполняются).
+
+@pytest.fixture(scope="session")
+def cpp_branches_inventory():
+    return load_report("cpp-branches", "Перечень_ветвей.csv")
+
+@pytest.fixture(scope="session")
+def cpp_branches_coverage():
+    return load_report("cpp-branches", "Покрытие_ветвей.csv")
+
+@pytest.fixture(scope="session")
+def cpp_branches_sensors():
+    return load_report("cpp-branches", "Карта_датчиков.csv")
+
+@pytest.fixture(scope="session")
+def cpp_branches_src():
+    return _src_dir("test-project-cpp-branches")
+
 @pytest.fixture(scope="session")
 def java_fo():
     return load_report("java", "Перечень_ФО(процедур_функций).csv")

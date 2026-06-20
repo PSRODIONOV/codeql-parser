@@ -108,6 +108,39 @@ def run_probe_query(codeql: str, db: Path, query: Path, path_pattern: str = "%")
     return pts
 
 
+def read_probe_points_from_db(project_db_path: str):
+    """Читает геометрию точек вставки из СЫРЫХ ДАННЫХ project.db (раздел 'probe',
+    собранный на этапе статики через probe_points.ql) и возвращает тот же формат,
+    что и run_probe_query — но БЕЗ отдельного запроса к CodeQL-БД. Это и есть
+    путь «всё берётся из сырых данных»: инструментатор ничего не запрашивает."""
+    import sys as _sys
+    _sys.path.insert(0, str(HERE.parent))
+    from core.project_db import ProjectDB
+
+    def _i(v):
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            return 0
+
+    proj = ProjectDB.open(project_db_path)
+    try:
+        rows = proj.load_raw_data().get("probe", [])
+    finally:
+        proj.close()
+    pts = []
+    for r in rows:
+        pts.append({
+            "kind": r.get("kind", ""), "func": r.get("func", ""),
+            "file": r.get("file", ""),
+            "ref_line": _i(r.get("ref_line")), "ins_line": _i(r.get("ins_line")),
+            "ins_col": _i(r.get("ins_col")), "has_block": _i(r.get("has_block")),
+            "btype": r.get("btype", ""),
+            "end_line": _i(r.get("end_line")), "end_col": _i(r.get("end_col")),
+        })
+    return pts
+
+
 def _strip_tpl(name: str) -> str:
     """Удаляет параметры шаблонов из qualified_name: Foo<int>::bar → Foo::bar."""
     prev = None
@@ -238,6 +271,10 @@ def main():
     ap.add_argument("--exclude-list", default="", help="Текстовый файл — чёрный список путей (по одному на строку)")
     ap.add_argument("--no-branches", action="store_true",
                     help="инструментировать только вход/выход ФО, без датчиков ветвей")
+    ap.add_argument("--project-db", default="",
+                    help="Путь к project.db. Если задан — геометрия точек вставки "
+                         "берётся из сырых данных (раздел 'probe'), БЕЗ отдельного "
+                         "запроса probe_points.ql к CodeQL-БД.")
     args = ap.parse_args()
     # Резолвим codeql как статический анализатор (локальный codeql-win/codeql-linux)
     import sys as _sys
@@ -286,10 +323,20 @@ def main():
     print(f"[2] ФО из статики: {fo_total} (уникальных имён: {len(fo_num)}), "
           f"ветвей: {br_total} (уникальных пар имя/строка: {len(br_num)})")
 
-    # 3. Точки вставки из CodeQL
-    pts = run_probe_query(args.codeql, db_path,
-                          HERE.parent / "queries" / args.lang / "probe_points.ql",
-                          path_pattern=args.pattern or "%")
+    # 3. Точки вставки. Основной путь — из СЫРЫХ ДАННЫХ project.db (раздел
+    #    'probe', собранный статикой): инструментатор НЕ делает отдельный запрос.
+    #    Запрос probe_points.ql остаётся только как fallback для standalone-режима
+    #    (analyze_project.py/CLI), где project.db нет.
+    if args.project_db:
+        pts = read_probe_points_from_db(args.project_db)
+        print(f"[3] Геометрия точек вставки: из сырых данных project.db "
+              f"(раздел 'probe', без отдельного запроса)")
+    else:
+        pts = run_probe_query(args.codeql, db_path,
+                              HERE.parent / "queries" / args.lang / "probe_points.ql",
+                              path_pattern=args.pattern or "%")
+        print(f"[3] Геометрия точек вставки: запросом probe_points.ql "
+              f"(project.db не передан — standalone-режим)")
     n_before_dedup = len(pts)
     pts = _dedup_by_position(pts)
     print(f"[3] Точек вставки из CodeQL: {n_before_dedup} "
@@ -467,7 +514,15 @@ def main():
         #
         # Обработка newline_after ОТДЕЛЬНО (см. instrument_c_make.py):
         # группируем по ln_no, сдвиг накапливается внутри группы.
-        all_ops = sorted(ins, key=lambda x: (-x[1], -x[2], 2 if x[0] == "close" else 0))
+        # Третий ключ: при РАВНЫХ (строка, колонка) "close" применяется РАНЬШЕ
+        # "open". Так бывает только когда тело ветви пустое/нулевой ширины
+        # (напр. `if (x>0) ;` — open и close попадают на колонку одного и того
+        # же ';'): если открыть первым, "}" по устаревшей колонке встанет сразу
+        # после "{", дав `{ } датчик; ;` и оторвав `else` от `if`
+        # (см. classify_empty). Пары с РАЗНЫМИ колонками уже корректно
+        # упорядочены по -col (close правее => применяется первым), поэтому на
+        # них этот тай-брейк не влияет (напр. однострочный `if ... ; else ...;`).
+        all_ops = sorted(ins, key=lambda x: (-x[1], -x[2], 0 if x[0] == "close" else 1))
 
         for op, ln_no, col, text, *_ in all_ops:
             idx = ln_no - 1
@@ -503,17 +558,28 @@ def main():
             elif op == "direct":
                 # case/default — вставить текст датчика сразу после ':'
                 # метки, без скобок (см. has_block=2 в probe_points.ql).
-                if 0 <= col <= len(ln):
+                # ins_col = колонка_двоеточия + 1; если ':' стоит в КОНЦЕ строки
+                # (типичное `case N:` без кода после), col == len(ln)+1 — это
+                # валидная позиция «дописать в конец», поэтому граница len+1,
+                # а не len (иначе датчик молча не вставлялся бы — см. weekday_kind).
+                if 0 <= col <= len(ln) + 1:
                     lines[idx] = ln[:col] + " " + text + ln[col:] + nl
         lines.insert(0, f'#include "__trace.h"{dominant_nl}')
         with open(fp, "w", encoding="utf-8", newline='') as f:
             f.write("".join(lines))
 
-    # 6. Рантайм: __trace.h + __trace_rt.cpp (с подставленными LANG/COUNT)
-    shutil.copy(RUNTIME / "__trace.h", out / "__trace.h")
-    tmpl = (RUNTIME / "__trace_rt.c.tmpl").read_text(encoding="utf-8")
-    rt = tmpl.replace("@LANG@", args.lang).replace("@COUNT@", str(max(total_sensors, 1)))
-    (out / "__trace_rt.cpp").write_text(rt, encoding="utf-8")
+    # 6. Рантайм: ЕДИНЫЙ header-only __trace.h — всё тело датчиков (макросы,
+    #    реализация __trace_hit И запись фактических маршрутов R/C) в ОДНОМ
+    #    заголовке. Отдельный __trace_rt.cpp НЕ нужен: реализация и состояние
+    #    помечены weak и сливаются линкером в один экземпляр на бинарник, даже
+    #    если заголовок подключён в каждой единице трансляции. Поэтому
+    #    достаточно '#include "__trace.h"' везде; заголовок можно один раз
+    #    положить в /usr/include, и он будет виден отовсюду (см. шапку
+    #    __trace_singlehdr.h). Заодно даёт маршруты R/C для route_match.
+    #    Префикс языка в имени файла трасс (<lang>-<ts>-<pid>.log) — под --lang.
+    _hdr = (RUNTIME / "__trace_singlehdr.h").read_text(encoding="utf-8")
+    _hdr = f'#define CQ_LANG "{args.lang}"\n' + _hdr
+    (out / "__trace.h").write_text(_hdr, encoding="utf-8")
 
     # 7. Карта датчиков
     with open(out / "Карта_датчиков.csv", "w", encoding="utf-8-sig", newline="") as fh:
@@ -552,13 +618,22 @@ def main():
         sys.exit(2)
     print(f"[8] Синтаксис OK. Карта датчиков: {out / 'Карта_датчиков.csv'}")
 
-    # Pruning: оставляем только инструментированные файлы + рантайм
+    # Pruning: оставляем только инструментированные единицы трансляции + рантайм.
+    # ЗАГОЛОВКИ НЕ УДАЛЯЕМ: они подключаются (#include) инструментированными
+    # .c/.cpp и нужны для компиляции, даже если сами не содержат точек вставки
+    # (декларации, не самодостаточны). Удаление заголовка-декларации (напр.
+    # if_demo.h без inline-тел) ломает сборку файла, который его включает.
+    # Поэтому _prune_exts — только единицы трансляции, без .h/.hpp/.inl.
     _touched = {present[b] for b in insertions}
-    _runtime = {out / "__trace.h", out / "__trace_rt.cpp"}
-    _lang_exts = {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".inl"}
+    # __trace.h — единый header-only рантайм; отдельного __trace_rt.cpp больше
+    # нет, поэтому НЕ исключаем его из pruning: устаревший __trace_rt.cpp от
+    # прежних прогонов должен удаляться (его strong-символ __trace_hit иначе
+    # перекрыл бы weak-реализацию из заголовка и маршруты R/C не записались бы).
+    _runtime = {out / "__trace.h"}
+    _prune_exts = {".c", ".cpp", ".cc", ".cxx"}
     _pruned = 0
     for _p in list(out.rglob("*")):
-        if _p.is_file() and _p.suffix.lower() in _lang_exts \
+        if _p.is_file() and _p.suffix.lower() in _prune_exts \
                 and _p not in _touched and _p not in _runtime:
             _p.unlink()
             _pruned += 1

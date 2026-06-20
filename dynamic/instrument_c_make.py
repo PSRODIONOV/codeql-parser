@@ -521,8 +521,12 @@ def main():
             elif op == "direct":
                 # case/default — просто вставить текст датчика сразу после
                 # ':' метки, без скобок (см. has_block=2 в probe_points.ql).
+                # ins_col = колонка_двоеточия + 1; при ':' в КОНЦЕ строки
+                # (обычное `case N:`) shifted_col == len(ln)+1 — валидная
+                # позиция «в конец», поэтому граница len+1, иначе датчик
+                # молча терялся бы (см. weekday_kind в test-project-cpp-branches).
                 shifted_col = col + col_shifts.get(ln_no, 0)
-                if 0 <= shifted_col <= len(ln):
+                if 0 <= shifted_col <= len(ln) + 1:
                     lines[idx] = ln[:shifted_col] + " " + text + ln[shifted_col:] + nl
                     col_shifts[ln_no] = col_shifts.get(ln_no, 0) + len(" " + text)
 
