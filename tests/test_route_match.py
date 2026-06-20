@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "dynamic"))
-from route_match_report import _collapse_cycles, _branch_sig  # noqa: E402
+from route_match_report import _collapse_cycles, _branch_sig, is_instrumented  # noqa: E402
 
 
 class TestCollapseCycles:
@@ -49,3 +49,22 @@ class TestBranchSig:
         """else (-нет / тело else) не входит в сигнатуру — датчик на «да»-стороне."""
         assert _branch_sig("if #1 -нет->Конец") == ()
         assert _branch_sig("if #1 -да->Конец") == (1,)
+
+    def test_switch_case_route_in_sig(self):
+        """Метки switch (case/default) инструментируются — входят в сигнатуру
+        (fallthrough case0->case6 даёт (1,2))."""
+        assert _branch_sig("case #1 -да->case #2 -да->Конец") == (1, 2)
+        assert _branch_sig("default #8 -да->Конец") == (8,)
+
+
+class TestIsInstrumented:
+
+    @pytest.mark.parametrize("btype,outcome,exp", [
+        ("if", "да", True), ("if", "нет", False),
+        ("for", "да", True), ("while", "нет", False),
+        ("try", "catch", True), ("try", "нет исключения", True),
+        ("case", "да", True), ("default", "да", True),
+        ("else", "да", False),   # else не инструментируется (датчик на then)
+    ])
+    def test_is_instrumented(self, btype, outcome, exp):
+        assert is_instrumented(btype, outcome) is exp

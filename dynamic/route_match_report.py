@@ -36,10 +36,12 @@ def read_csv(path):
 
 def is_instrumented(btype: str, outcome: str) -> bool:
     """Сработает ли датчик ветви: датчик стоит на «да»-стороне (then/тело цикла/
-    try-блок). Для try вход в блок происходит при любом исходе."""
+    try-блок). Для try вход в блок происходит при любом исходе. Метки switch
+    (case/default) инструментируются и срабатывают при достижении (в т.ч. через
+    fallthrough), поэтому считаются сработавшими."""
     if btype in ("if", "for", "while", "do"):
         return outcome.strip() == "да"
-    if btype == "try":
+    if btype in ("try", "case", "default"):
         return True
     return False
 

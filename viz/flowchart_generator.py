@@ -976,6 +976,15 @@ class FlowchartGenerator:
             return (st, b), ("да", "нет")
         if st == "try":
             return (st, b), ("нет исключения", "catch")
+        if st == "switch":
+            # N-арное ветвление: исход = номер ветви точки входа (case/default).
+            # Сам switch как cond не пишется — записываются метки (см. build_path);
+            # fallthrough моделируется в _arms (рукав = метки от данной до выхода).
+            outs = tuple(c.get("branch_num") for c in node.get("children", [])
+                         if c.get("stmt_type") in ("case", "default") and c.get("branch_num"))
+            if outs:
+                return ("switch", id(node)), outs
+            return None
         return None
 
     def _arms(self, node):
@@ -994,6 +1003,18 @@ class FlowchartGenerator:
             catch_ch = sorted([c for c in ch if int(c.get("in_catch", 0) or 0)],
                               key=lambda x: x["line_start"])
             return [("нет исключения", try_ch), ("catch", catch_ch)]
+        if st == "switch":
+            # Один рукав на каждую метку case/default: «провал» (fallthrough) —
+            # рукав идёт от метки до конца тела switch; build_path остановится на
+            # первом терминаторе (return/break), а пройденные метки запишет как
+            # отдельные ветви. Так маршрут совпадает с фактическим (рантайм пишет
+            # каждую метку, через которую прошёл fallthrough).
+            sch = sorted(ch, key=lambda x: x["line_start"])
+            arms = []
+            for i, c in enumerate(sch):
+                if c["stmt_type"] in ("case", "default") and c.get("branch_num"):
+                    arms.append((c.get("branch_num"), sch[i:]))
+            return arms
         # for/while/do: "да" — вход в тело (один раз), "нет" — пропуск
         body = sorted(ch, key=lambda x: x["line_start"])
         return [("да", body), ("нет", [])]
@@ -1029,6 +1050,15 @@ class FlowchartGenerator:
         if st in self._TERMINATORS:
             memo[nid] = False
             return False
+        if st == "switch":
+            # switch «проваливается», если есть метка, чей рукав доходит до конца,
+            # ИЛИ нет default (тогда при несовпадении управление идёт мимо switch).
+            has_default = any(c.get("stmt_type") == "default"
+                              for c in node.get("children", []))
+            res = (not has_default) or any(
+                self._seq_falls_through(arm, memo) for _, arm in self._arms(node))
+            memo[nid] = res
+            return res
         d = self._decision_outcomes(node)
         if d:
             # ветвление «проваливается», если ХОТЯ БЫ одна ветвь доходит до конца
@@ -1066,8 +1096,8 @@ class FlowchartGenerator:
                 d = self._decision_outcomes(n)
                 if d:
                     key, outs = d
-                    decisions.append((n, key, outs[0]))
-                    decisions.append((n, key, outs[1]))
+                    for o in outs:          # 2 для if/цикла/try, N для switch
+                        decisions.append((n, key, o))
                 collect(n.get("children", []))
         collect(roots)
 
@@ -1113,7 +1143,11 @@ class FlowchartGenerator:
                             # базовый выбор: первая ветвь, доходящая до конца
                             ft = [a for a in arms if self._seq_falls_through(a[1], ft_memo)]
                             chosen = (ft or arms)[0]
-                    conds.append((key[0], key[1], chosen[0]))
+                    # Сам switch как условие НЕ пишем (у него нет номера ветви) —
+                    # записываются пройденные метки case/default (ниже), как и в
+                    # фактической трассе. Для прочих ветвлений пишем исход.
+                    if key[0] != "switch":
+                        conds.append((key[0], key[1], chosen[0]))
                     covered.add((key, chosen[0]))
                     nodes = chosen[1] + rest
                     continue
@@ -1122,6 +1156,12 @@ class FlowchartGenerator:
                     c = node.get("callee_num")
                     if c:
                         calls.append(c)
+                    nodes = rest
+                elif st in ("case", "default"):
+                    # Метка switch на пути fallthrough — отдельная пройденная ветвь.
+                    bn = node.get("branch_num")
+                    if bn:
+                        conds.append((st, bn, "да"))
                     nodes = rest
                 elif st in self._TERMINATORS:
                     break
