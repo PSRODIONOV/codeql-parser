@@ -25,6 +25,21 @@ QUERY_MAP: Dict[str, str] = {
     "probe":      "probe_points.ql",
 }
 
+# Приоритет stmt_type при дедупликации flow по (func_name[, func_file], stmt_id)
+# — stmt_id = "<файл>:<строка>" (getStmtId в function_flow.ql) не различает
+# разные операторы на ОДНОЙ строке, поэтому при коллизии нужен явный порядок
+# "что важнее оставить". switch/case/default — приоритет ветвления (10): без
+# пробела перед телом (`case 9:return 99;`, см. c1_LIR.hpp::as_BasicType)
+# метка и следующий за ней return делят строку/stmt_id — без приоритета
+# >= return(5) метка молча терялась бы из Перечень_ветвей.csv. Единая
+# константа вместо трёх копий — используется в трёх местах ниже.
+_STMT_TYPE_PRIORITY: Dict[str, int] = {
+    "if": 10, "for": 10, "while": 10, "do": 10, "try": 10,
+    "switch": 10, "case": 10, "default": 10,
+    "return": 5, "throw": 5, "break": 5, "continue": 5,
+    "other": 1, "expr": 1,
+}
+
 
 def _find_codeql(codeql_path: str) -> str:
     """Находит исполняемый файл CodeQL: по указанному пути, в PATH или локально."""
@@ -282,24 +297,15 @@ class CodeQLAnalyzer:
                     "Errors decoding results:\n" + "\n".join(decode_errors)
                 )
 
-            # Дедупликация flow по (func_name, func_file, stmt_id)
+            # Дедупликация flow по (func_name, func_file, stmt_id) — приоритет
+            # типов см. _STMT_TYPE_PRIORITY (общая константа, не копия).
             if "flow" in results:
-                # stmt_id = "<файл>:<строка>" (getStmtId в function_flow.ql) — не
-                # различает разные операторы на одной строке. switch/case/default
-                # обязаны иметь приоритет ветвления (10): без пробела перед телом
-                # (`case 9:return 99;`, см. c1_LIR.hpp::as_BasicType) метка и
-                # следующий за ней return делят строку/stmt_id — без приоритета
-                # >= return(5) метка молча терялась бы из Перечень_ветвей.csv.
-                _prio = {"if": 10, "for": 10, "while": 10, "do": 10, "try": 10,
-                         "switch": 10, "case": 10, "default": 10,
-                         "return": 5, "throw": 5, "break": 5, "continue": 5,
-                         "other": 1, "expr": 1}
                 best: Dict[Any, Dict[str, str]] = {}
                 for item in results["flow"]:
                     key = (item["func_name"], item.get("func_file", ""), item["stmt_id"])
                     if key not in best or (
-                        _prio.get(item.get("stmt_type", ""), 0)
-                        > _prio.get(best[key].get("stmt_type", ""), 0)
+                        _STMT_TYPE_PRIORITY.get(item.get("stmt_type", ""), 0)
+                        > _STMT_TYPE_PRIORITY.get(best[key].get("stmt_type", ""), 0)
                     ):
                         best[key] = item
                 results["flow"] = list(best.values())
@@ -330,14 +336,8 @@ class CodeQLAnalyzer:
 
     def get_function_flow(self) -> List[Dict[str, str]]:
         # При дублировании stmt_id (напр. DeclStmt и ForStmt на одной строке)
-        # оставляем управляющий тип: for/while/if/try > return/throw > other.
-        # switch/case/default — тоже приоритет 10 (см. _deduplicate_flow ниже:
-        # без пробела перед телом case/default делит stmt_id с return и без
-        # этого молча терялся бы из Перечень_ветвей.csv).
-        _prio = {"if": 10, "for": 10, "while": 10, "do": 10, "try": 10,
-                 "switch": 10, "case": 10, "default": 10,
-                 "return": 5, "throw": 5, "break": 5, "continue": 5,
-                 "other": 1, "expr": 1}
+        # оставляем управляющий тип — см. _STMT_TYPE_PRIORITY (общая
+        # константа, не копия).
         data = self._run_query("function_flow.ql", "flow")
         best: Dict[Any, Dict[str, str]] = {}
         for item in data:
@@ -345,26 +345,23 @@ class CodeQLAnalyzer:
             if key not in best:
                 best[key] = item
             else:
-                cur_prio = _prio.get(best[key].get("stmt_type", ""), 0)
-                new_prio = _prio.get(item.get("stmt_type", ""), 0)
+                cur_prio = _STMT_TYPE_PRIORITY.get(best[key].get("stmt_type", ""), 0)
+                new_prio = _STMT_TYPE_PRIORITY.get(item.get("stmt_type", ""), 0)
                 if new_prio > cur_prio:
                     best[key] = item
         return list(best.values())
 
     def _deduplicate_flow(self, data: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        """Дедупликация потоков функций с приоритетом типов."""
-        _prio = {"if": 10, "for": 10, "while": 10, "do": 10, "try": 10,
-                 "switch": 10, "case": 10, "default": 10,
-                 "return": 5, "throw": 5, "break": 5, "continue": 5,
-                 "other": 1, "expr": 1}
+        """Дедупликация потоков функций с приоритетом типов (см.
+        _STMT_TYPE_PRIORITY)."""
         best: Dict[Any, Dict[str, str]] = {}
         for item in data:
             key = (item["func_name"], item["stmt_id"])
             if key not in best:
                 best[key] = item
             else:
-                cur_prio = _prio.get(best[key].get("stmt_type", ""), 0)
-                new_prio = _prio.get(item.get("stmt_type", ""), 0)
+                cur_prio = _STMT_TYPE_PRIORITY.get(best[key].get("stmt_type", ""), 0)
+                new_prio = _STMT_TYPE_PRIORITY.get(item.get("stmt_type", ""), 0)
                 if new_prio > cur_prio:
                     best[key] = item
         return list(best.values())

@@ -46,15 +46,10 @@ def _parse_declared_at(s: str):
     return None, None
 
 
-def _sids_in_text(text: str) -> set:
-    """Извлечь sid-ы датчика из текста вставки — для отметки "не вставлен"
-    при пропуске inline_candidate (см. dropped_sids в main). __TRACE_FN(fo,
-    se, sx) — sid-ы это se/sx (2-е и 3-е число); __TRACE(s, fo, br) — sid
-    это s (1-е число)."""
-    nums = [int(n) for n in re.findall(r'\d+', text)]
-    if text.startswith("__TRACE_FN("):
-        return set(nums[1:3])
-    return {nums[0]} if nums else set()
+sys.path.insert(0, str(HERE))
+from _instrument_common import sids_in_text as _sids_in_text  # noqa: E402
+from _instrument_common import first_real_brace as _first_real_brace  # noqa: E402
+from _instrument_common import is_reliable_stmt_end as _is_reliable_stmt_end  # noqa: E402
 
 
 def read_fo_numbers(reports_dir: Path):
@@ -410,7 +405,12 @@ def main():
             touched.add(fp)
 
     total = sid - 1
-    print(f"[4] Датчиков размещено: {total} в {len(touched)} файлах (пропущено точек: {skipped})")
+    # total здесь — ДО разрешения inline_candidate и валидации open/close
+    # (которые могут ещё отбросить часть точек как "надёжного места нет",
+    # см. dropped_sids ниже) — поэтому это "потенциальные" точки, а не
+    # финальное число; окончательное и точное — в [OK] в конце.
+    print(f"[4] Точек к размещению (потенциально): {total} в {len(touched)} файлах "
+          f"(пропущено точек: {skipped})")
 
     # Рантайм-заголовок: одна копия в out/__trace.h. Реализация уже целиком в
     # заголовке (weak-символы) — пользователь сам копирует файл в системный
@@ -445,9 +445,16 @@ def main():
                     resolved.append(("newline_after", ln_no, col, text))
                 else:
                     resolved.append(("inline", ln_no, col, text))
-            elif "{" in ln_real:
-                # Fallback: { найдена на строке, но не на заявленной позиции
-                brace_col = ln_real.index("{") + 1  # 1-based
+            elif _first_real_brace(ln_real) >= 0:
+                # Fallback: { найдена на строке, но не на заявленной позиции.
+                # _first_real_brace (а не наивный "{" in ln_real/.index)
+                # пропускает символьные/строковые литералы И однострочные
+                # комментарии — иначе самодостаточный макрос без единой
+                # настоящей { на строке (см. MAKE_ADDER ниже) ложно резолвился
+                # бы по случайной '{' в соседнем комментарии вида "// см.
+                # Foo::bar() { ... }", вместо того чтобы дойти до проверки
+                # "надёжного места нет" чуть ниже (см. ревью этой сессии).
+                brace_col = _first_real_brace(ln_real) + 1  # 1-based
                 if "__TRACE_FN" in text:
                     resolved.append(("newline_after", ln_no, brace_col, text))
                 else:
@@ -483,26 +490,37 @@ def main():
                 o_idx, c_idx = o_ln_no - 1, c_ln_no - 1
                 o_ln = _strip_nl(lines[o_idx])[0] if 0 <= o_idx < len(lines) else None
                 c_ln = _strip_nl(lines[c_idx])[0] if 0 <= c_idx < len(lines) else None
-                # Последний символ тела (по координате CodeQL, c_col-1 0-based)
-                # должен быть ';' — этим заканчивается ЛЮБОЙ корректный
-                # одиночный оператор (ExprStmt/ReturnStmt/ThrowStmt/пустой ';'
-                # и т.п.). Если это не так — HotSpot-идиома CHECK/CHECK_/
-                # RETURN/TRAPS: макрос-аргумент САМ закрывает скобки вызова
-                # (`f(..., CHECK)` -> `f(..., THREAD); if (...) return; ...)`),
-                # и CodeQL репортует конец оператора там, где кончается
-                # макроподстановка (сразу после "CHECK"), а НЕ после настоящего
-                # ');' вызова. Вставка "}" по такой координате попадёт ВНУТРЬ
-                # списка аргументов вызова (см. classfile_parse_error(...,
-                # CHECK) в classFileParser.cpp) — пары нет надёжного места,
-                # пропускаем обе половины (как макро-кейсы выше).
+                # Последний символ тела (по координате CodeQL, c_col-1
+                # 0-based) должен быть ПУНКТУАЦИЕЙ (';', ')', '}' и т.п.) —
+                # этим заканчивается ЛЮБОЙ корректный одиночный оператор
+                # (ExprStmt/ReturnStmt/ThrowStmt/пустой ';', GNU statement-
+                # expression `({ ... })` как аргумент и т.п.). Буква/цифра/'_'
+                # на этой позиции — признак, что координата обрезана ВНУТРИ
+                # идентификатора: HotSpot-идиома CHECK/CHECK_/RETURN/TRAPS
+                # (макрос-аргумент САМ закрывает скобки вызова — `f(...,
+                # CHECK)` -> `f(..., THREAD); if (...) return; ...)`), и
+                # CodeQL репортует конец оператора там, где кончается
+                # макроподстановка (сразу после "CHECK"), а НЕ после
+                # настоящего ');' вызова. Вставка "}" по такой координате
+                # попадёт ВНУТРЬ списка аргументов вызова (см.
+                # classfile_parse_error(..., CHECK) в classFileParser.cpp) —
+                # пары нет надёжного места, пропускаем обе половины (как
+                # макро-кейсы выше).
                 c_last_ok = (c_ln is not None and 0 < c_col <= len(c_ln)
-                             and c_ln[c_col - 1] == ';')
+                             and _is_reliable_stmt_end(c_ln[c_col - 1]))
                 if (o_ln is not None and c_ln is not None
                         and 0 <= o_col <= len(o_ln) and 0 <= c_col <= len(c_ln)
                         and c_last_ok):
                     final.append(entry)
                     final.append(resolved[i + 1])
-                elif o_ln is not None and c_ln is not None:
+                else:
+                    # Пара не прошла валидацию (выход за границы файла —
+                    # координата от CodeQL искажена макрорасширением, ИЛИ
+                    # c_last_ok=False) — sid обеих половин (open и close,
+                    # если у close есть свой sid) надо вычесть из
+                    # sensor_map, иначе Карта_датчиков.csv лжёт про датчик,
+                    # которого в реальном тексте нет (см. ревью: тот же
+                    # класс бага, что и в short_name not in ln_real выше).
                     dropped_sids.update(_sids_in_text(entry[3]))
                 i += 2
             else:
@@ -610,6 +628,12 @@ def main():
                 if 0 <= shifted_col <= len(ln):
                     lines[idx] = ln[:shifted_col] + " " + text + ln[shifted_col:] + nl
                     col_shifts[ln_no] = col_shifts.get(ln_no, 0) + len(" " + text)
+                else:
+                    # Граница не прошла (накопленный сдвиг увёл shifted_col
+                    # за пределы строки) — датчик не вставлен, sid нужно
+                    # вычесть из sensor_map (см. ревью: тот же класс бага,
+                    # что и в open/close-валидации выше).
+                    dropped_sids.update(_sids_in_text(text))
 
         lines.insert(0, f'#include "__trace.h"{dominant_nl}')
         with open(fp, "w", encoding="utf-8", newline='') as f:
