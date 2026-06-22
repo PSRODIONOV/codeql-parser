@@ -62,10 +62,38 @@ MAKE_ADDER(add_via_macro)
 MAKE_ADDER(add_via_macro2)
 #undef MAKE_ADDER
 
+// ── 5. HotSpot-идиома CHECK/CHECK_/RETURN/TRAPS: макрос — ПОСЛЕДНИЙ аргумент
+// вызова, который сам ЗАКРЫВАЕТ список аргументов и порождает if + ещё один
+// оператор, "поглощая" хвостовые ')'/';' исходного вызова (см. CHECK в
+// utilities/exceptions.hpp, классический паттерн `f(args, CHECK);` ->
+// `f(args, THREAD); if (HAS_PENDING_EXCEPTION) return; (void)(0);`).
+// classfile_parse_error("...", CHECK) в classFileParser.cpp — реальный
+// пример. CodeQL репортует конец ОДИНОЧНОГО оператора-тела if (hasBlock=0)
+// там, где кончается макроподстановка (сразу после "CHECK", ВНУТРИ списка
+// аргументов вызова), а не после настоящего ');'. Обернуть тело в "{
+// датчик; ВЫЗОВ }" по такой координате — вставить "}" ВНУТРЬ аргументов
+// вызова (см. лог: `log_message("...", DUMMY_THREAD });`). Надёжного места
+// нет — пара open/close (и сам датчик) пропускается; ветвь if при этом
+// остаётся в статике (Перечень_ветвей), но без датчика ("не инстр." в
+// Покрытие_ветвей, см. тест test_check_macro_branch_not_instrumented).
+static bool g_check_failed = false;
+#define DUMMY_THREAD 0
+#define CHECK DUMMY_THREAD); if (g_check_failed) return; (void)(0
+
+void log_message(const char* msg, int thread) { (void)msg; (void)thread; }
+
+void check_macro_guard(bool flag) {
+    if (flag)                   // ветвь #1 (if) — тело заканчивается на CHECK
+        log_message("guarded call", CHECK);
+}
+#undef CHECK
+
 // Обычный ФО — вызывает всё, чтобы макро-функции попали в сборку/БД.
 int call_macro_demo(void) {
     macro_full_body();
     run_macro("");              // вызвать опасный макро-ФО (его ПОК исключается)
+    check_macro_guard(true);
+    check_macro_guard(false);
     return get_answer() + get_zero() + macro_body(5) + macro_body(-3)
          + add_via_macro(2, 3) + add_via_macro2(4, 5);
 }

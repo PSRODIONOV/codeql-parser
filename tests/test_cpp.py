@@ -15,7 +15,7 @@ import pytest
 from conftest import source_line, get_sig_line
 
 ALLOWED_TYPES = {"if", "else", "for", "while", "do", "try", "catch", "case", "default"}
-TOTAL_BRANCHES = 100
+TOTAL_BRANCHES = 101
 
 
 def _short(fo: str) -> str:
@@ -111,6 +111,14 @@ class TestBranchDetection:
         t = types_of(rows)
         assert len(rows) == 2 and t.count("case") == 1 and t.count("default") == 1
 
+    def test_check_macro_branch_tracked_in_statics(self, cpp_branches_inventory):
+        """Регрессия (HotSpot CHECK/CHECK_/RETURN/TRAPS-идиома, см.
+        classFileParser.cpp::classfile_parse_error(..., CHECK)): сам if не
+        макро-сгенерирован, поэтому остаётся в статике как обычная ветвь —
+        несмотря на то что его тело (заканчивающееся на CHECK) не получает
+        динамического датчика (см. TestCoverage/TestInstrumentorRegressionBugs)."""
+        assert types_of(branches_of(cpp_branches_inventory, "check_macro_guard")) == ["if"]
+
 
 # ── Макро-ФО ─────────────────────────────────────────────────────────────────
 
@@ -199,11 +207,27 @@ class TestSensorMap:
 
 class TestCoverage:
 
+    # Ветви без датчика (HotSpot CHECK-идиома — см. check_macro_guard и
+    # TestInstrumentorRegressionBugs): coverage_report.py корректно отличает
+    # "нет датчика" ("не инстр.") от "датчик есть, но не сработал" ("нет") —
+    # такие ветви исключаются из подсчёта, а не считаются непокрытыми.
+    NOT_INSTRUMENTED = {("check_macro_guard", "1")}
+
     def test_all_branches_covered(self, cpp_branches_coverage):
         assert len(cpp_branches_coverage) == TOTAL_BRANCHES
-        not_covered = [r for r in cpp_branches_coverage if r.get("Покрыта", "").strip() != "да"]
+        not_covered = [r for r in cpp_branches_coverage
+                        if r.get("Покрыта", "").strip() != "да"
+                        and (r.get("ФО"), r.get("№ ветви")) not in self.NOT_INSTRUMENTED]
         assert not not_covered, (
             f"не покрыты: {[(r.get('ФО'), r.get('№ ветви')) for r in not_covered]}")
+
+    def test_check_macro_branch_not_instrumented(self, cpp_branches_coverage):
+        """Регрессия: ветвь if, чьё тело заканчивается на HotSpot-идиому
+        CHECK, корректно помечена "не инстр." (а не ложно "нет"/непокрыта) —
+        датчик для неё не ставился (см. TestInstrumentorRegressionBugs)."""
+        rows = [r for r in cpp_branches_coverage if r.get("ФО") == "check_macro_guard"]
+        assert len(rows) == 1
+        assert rows[0].get("Покрыта", "").strip() == "не инстр."
 
 
 # ── Сигнатурный анализ (ПОК) ─────────────────────────────────────────────────
@@ -291,3 +315,17 @@ class TestInstrumentorRegressionBugs:
         assert body.count("{") == body.count("}"), f"несбалансированные {{}}: {body!r}"
         assert re.search(r"if \(x % 2 == 0\) \{ __TRACE\(\d+, \d+, \d+\); r = x / 2; \}"
                           r" else \{ __TRACE\(\d+, \d+, \d+\); r = x \* 3 \+ 1; \}", body)
+
+    def test_check_macro_idiom_not_corrupted(self, cpp_branches_instrumented_src):
+        """Регрессия (HotSpot CHECK/CHECK_/RETURN/TRAPS-идиома, см.
+        classFileParser.cpp::classfile_parse_error(..., CHECK)): макрос —
+        последний аргумент вызова, сам закрывающий список аргументов и
+        порождающий if внутри своего раскрытия — CodeQL репортует конец
+        одиночного оператора-тела if (hasBlock=0) сразу после "CHECK", а не
+        после настоящего ');'. Обёртка "{ датчик; ВЫЗОВ }" по такой
+        координате вставила бы "}" ВНУТРЬ списка аргументов вызова
+        (`log_message("...", DUMMY_THREAD });`). Строка должна остаться
+        буквально неизменной — без датчика."""
+        src = (cpp_branches_instrumented_src / "macro_demo.cpp").read_text(encoding="utf-8")
+        assert re.search(r'^\s*log_message\("guarded call", CHECK\);\s*$', src, re.M), (
+            "вызов log_message(..., CHECK) изменён/разрезан")

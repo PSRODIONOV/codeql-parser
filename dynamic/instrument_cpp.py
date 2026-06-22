@@ -519,10 +519,25 @@ def main():
                 o_idx, c_idx = o_ln_no - 1, c_ln_no - 1
                 o_ln = _strip_nl(lines[o_idx])[0] if 0 <= o_idx < len(lines) else None
                 c_ln = _strip_nl(lines[c_idx])[0] if 0 <= c_idx < len(lines) else None
+                # Последний символ тела (c_col-1, 0-based) должен быть ';' —
+                # этим заканчивается ЛЮБОЙ корректный одиночный оператор. Если
+                # нет — HotSpot-идиома CHECK/CHECK_/RETURN/TRAPS: макрос-
+                # аргумент САМ закрывает скобки вызова (`f(..., CHECK)` ->
+                # `f(..., THREAD); if (...) return; ...)`), и CodeQL
+                # репортует конец оператора там, где кончается макроподстановка
+                # (сразу после "CHECK"), а НЕ после настоящего ');' вызова.
+                # Вставка "}" по такой координате попала бы ВНУТРЬ списка
+                # аргументов вызова (см. classfile_parse_error(..., CHECK) в
+                # classFileParser.cpp) — надёжного места нет, пропускаем пару.
+                c_last_ok = (c_ln is not None and 0 < c_col <= len(c_ln)
+                             and c_ln[c_col - 1] == ';')
                 if (o_ln is not None and c_ln is not None
-                        and 0 <= o_col <= len(o_ln) and 0 <= c_col <= len(c_ln)):
+                        and 0 <= o_col <= len(o_ln) and 0 <= c_col <= len(c_ln)
+                        and c_last_ok):
                     final.append(entry)
                     final.append(resolved[i + 1])
+                elif o_ln is not None and c_ln is not None:
+                    dropped_sids.update(_sids_in_text(entry[3]))
                 i += 2
             else:
                 final.append(entry)
