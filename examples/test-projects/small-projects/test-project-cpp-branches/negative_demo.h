@@ -22,4 +22,8 @@ int retry_goto(int n);
 // Управление, сгенерированное макросом, — исключается из отслеживания.
 int macro_control(int x);
 
+// case-метки, сгенерированные ОДНИМ макровызовом (паттерн REP8/REP16) —
+// исключаются из отслеживания; обычные метки того же switch — нет.
+int macro_generated_cases(int op);
+
 #endif // NEGATIVE_DEMO_H

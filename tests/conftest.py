@@ -169,6 +169,20 @@ def cpp_branches_src():
     return _src_dir("test-project-cpp-branches")
 
 @pytest.fixture(scope="session")
+def cpp_branches_fo():
+    return load_report("cpp-branches", "Перечень_ФО(процедур_функций).csv")
+
+@pytest.fixture(scope="session")
+def cpp_branches_instrumented_src():
+    """Каталог ИНСТРУМЕНТИРОВАННЫХ исходников (после instrument_c_make.py) —
+    для проверок на побайтовую корректность вставки (не только наличие
+    записи в статике): неразрезанные ключевые слова, сбалансированные {}."""
+    return _first_existing(
+        ROOT / "workspace" / "test-project-cpp-branches" / "instrumented-sources",
+        ROOT / "examples" / "workspace" / "test-project-cpp-branches" / "instrumented-sources",
+    )
+
+@pytest.fixture(scope="session")
 def java_fo():
     return load_report("java", "Перечень_ФО(процедур_функций).csv")
 

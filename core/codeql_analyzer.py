@@ -284,7 +284,14 @@ class CodeQLAnalyzer:
 
             # Дедупликация flow по (func_name, func_file, stmt_id)
             if "flow" in results:
+                # stmt_id = "<файл>:<строка>" (getStmtId в function_flow.ql) — не
+                # различает разные операторы на одной строке. switch/case/default
+                # обязаны иметь приоритет ветвления (10): без пробела перед телом
+                # (`case 9:return 99;`, см. c1_LIR.hpp::as_BasicType) метка и
+                # следующий за ней return делят строку/stmt_id — без приоритета
+                # >= return(5) метка молча терялась бы из Перечень_ветвей.csv.
                 _prio = {"if": 10, "for": 10, "while": 10, "do": 10, "try": 10,
+                         "switch": 10, "case": 10, "default": 10,
                          "return": 5, "throw": 5, "break": 5, "continue": 5,
                          "other": 1, "expr": 1}
                 best: Dict[Any, Dict[str, str]] = {}
@@ -324,7 +331,11 @@ class CodeQLAnalyzer:
     def get_function_flow(self) -> List[Dict[str, str]]:
         # При дублировании stmt_id (напр. DeclStmt и ForStmt на одной строке)
         # оставляем управляющий тип: for/while/if/try > return/throw > other.
+        # switch/case/default — тоже приоритет 10 (см. _deduplicate_flow ниже:
+        # без пробела перед телом case/default делит stmt_id с return и без
+        # этого молча терялся бы из Перечень_ветвей.csv).
         _prio = {"if": 10, "for": 10, "while": 10, "do": 10, "try": 10,
+                 "switch": 10, "case": 10, "default": 10,
                  "return": 5, "throw": 5, "break": 5, "continue": 5,
                  "other": 1, "expr": 1}
         data = self._run_query("function_flow.ql", "flow")
@@ -343,6 +354,7 @@ class CodeQLAnalyzer:
     def _deduplicate_flow(self, data: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """Дедупликация потоков функций с приоритетом типов."""
         _prio = {"if": 10, "for": 10, "while": 10, "do": 10, "try": 10,
+                 "switch": 10, "case": 10, "default": 10,
                  "return": 5, "throw": 5, "break": 5, "continue": 5,
                  "other": 1, "expr": 1}
         best: Dict[Any, Dict[str, str]] = {}

@@ -77,3 +77,26 @@ long factorial(int n) {
     if (n <= 1) return 1;          // ветвь #1 (if)
     return n * factorial(n - 1);
 }
+
+// 1 ветвь (if): символьный литерал '{' в условии И настоящая открывающая {
+// тела — на ОДНОЙ строке (паттерн HotSpot adlc/adlparse.cpp::get_oplist:
+// `|| ( next_char(), (_curchar != '{')) ) {`). Наивный поиск "{" с начала
+// строки нашёл бы литерал раньше настоящей скобки и разрезал бы код пополам
+// внутри литерала — инструментатор должен брать уже проверенную координату
+// из CodeQL, а не искать "{" заново.
+bool brace_literal_guard(char c, bool flag) {
+    if (c != '{' && flag) {       // ветвь #1 (if) — литерал '{' в условии
+        return true;
+    }
+    return false;
+}
+
+// 2 ветви (case): метки без пробела перед телом (паттерн HotSpot
+// c1_LIR.hpp::as_BasicType: `case ...metadata_type:return ...;`). Колонка
+// вставки датчика (col-1 от CodeQL) не должна разрезать первое слово тела.
+int case_no_space_kind(int x) {
+    switch (x) {
+        case 9:return 99;          // ветвь #1 (case) — без пробела перед телом
+        default:return -1;         // ветвь #2 (default) — без пробела перед телом
+    }
+}

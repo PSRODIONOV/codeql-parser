@@ -44,6 +44,17 @@ def _parse_declared_at(s: str):
     return None, None
 
 
+def _sids_in_text(text: str) -> set:
+    """Извлечь sid-ы датчика из текста вставки — для отметки "не вставлен"
+    при пропуске inline_candidate (см. dropped_sids в main). __TRACE_FN(fo,
+    se, sx) — sid-ы это se/sx (2-е и 3-е число); __TRACE(s, fo, br) — sid
+    это s (1-е число)."""
+    nums = [int(n) for n in re.findall(r'\d+', text)]
+    if text.startswith("__TRACE_FN("):
+        return set(nums[1:3])
+    return {nums[0]} if nums else set()
+
+
 def read_fo_numbers(reports_dir: Path):
     """Перечень_ФО → {qualified_name: [(fo_num, file, line), ...]} — СПИСОК,
     а не один номер: разные функции (в разных файлах — static-тёзки,
@@ -363,6 +374,14 @@ def main():
     #   op "close"   — вставить ' }' после позиции col (has_block=0, закрывающий)
     insertions: dict = {}
     sensor_map = []
+    # sid-ы датчиков, для которых на этапе разрешения inline_candidate (ниже,
+    # по факту чтения файла) выяснилось, что надёжного места для вставки нет
+    # (самодостаточный макрос, X-macro и т.п.) — sensor_map уже был заполнен
+    # НА МОМЕНТ диспетчеризации (раньше, чем стало известно это), поэтому без
+    # вычитания этих sid Карта_датчиков.csv лгала бы: для них есть
+    # "вход"/"выход", хотя __TRACE_FN в реальный текст не попал (см.
+    # add_via_macro в test-project-cpp-branches).
+    dropped_sids = set()
     skipped = []
     sid = 1
     for pt in sorted(pts, key=lambda x: (x["file"], x["ins_line"], x["ins_col"])):
@@ -460,7 +479,7 @@ def main():
                 # Name##Node::Method и т.п.) — надёжного места для датчика
                 # нет, датчик не ставим (см. подробный комментарий в
                 # _short_name и в instrument_c_make.py).
-                pass
+                dropped_sids.update(_sids_in_text(text))
             elif end_line > ln_no:
                 # Вызов макроса (JVM_ENTRY/JNI_ENTRY и т.п.) может занимать
                 # несколько строк (длинная сигнатура) — вставлять сразу
@@ -469,16 +488,21 @@ def main():
                 # вызова реально балансируются.
                 call_end_idx = _find_macro_call_end_idx(lines, idx)
                 resolved.append(("newline_after", call_end_idx + 1, 0, text))
-            elif (end_line == ln_no and end_col > 0
-                  and 0 <= col <= len(ln_real) and end_col <= len(ln_real)):
-                # Оба якоря (открывающий и закрывающий) должны быть в
-                # пределах реальной длины строки — иначе пара open/close
-                # окажется несимметричной (одна половина уедет в конец
-                # строки/в чужую вставку), а это либо рассинхронизирует
-                # скобки, либо разрежет соседний уже вставленный текст.
-                resolved.append(("open",  ln_no, col, text))
-                resolved.append(("close", end_line, end_col, ""))
-            # иначе — нет надёжного места вставки, датчик пропускается
+            else:
+                # end_line == ln_no, нет ни одной "{" на строке, но
+                # short_name встречается (как аргумент макровызова) —
+                # целиком самодостаточный макрос (открывает И закрывает блок
+                # внутри СВОЕГО определения, см. JAVA_INTEGER_OP: `inline
+                # TYPE NAME(...) { ... }` целиком в теле макроса). Обернуть
+                # вызов в "{ датчик; ВЫЗОВ }" нельзя — макрос сам уже
+                # произведёт пару {}, и получится вложенное определение
+                # функции внутри { } (ошибка компиляции). Внутрь тела
+                # (которое целиком в ТЕКСТЕ ОПРЕДЕЛЕНИЯ макроса, общем для
+                # всех вызовов) поставить датчик тоже нельзя — нет
+                # дискриминации по конкретному ФО. Надёжного места нет —
+                # пропускаем (тот же случай, что и short_name not in ln_real
+                # чуть выше).
+                dropped_sids.update(_sids_in_text(text))
 
         # Те же open/close пары, но пришедшие из ОРИГИНАЛЬНОГО has_block=0
         # пути — там text файла ещё не было прочитан, границы не проверялись.
@@ -537,7 +561,14 @@ def main():
                 # / `else { stmt; }`, где { и } на ОДНОЙ строке: наивная
                 # вставка "после строки" ставит датчик уже ЗА закрывающей }
                 # блока — между ним и `else`, что компилятор не принимает.
-                brace_pos = ln.find('{')
+                # ВАЖНО: col уже указывает на проверенную позицию { (см. этап
+                # разрешения inline_candidate выше) — использовать именно её,
+                # а не искать "{" заново с начала строки: на строке может
+                # встретиться более РАННИЙ "{" внутри символьного/строкового
+                # литерала (например условие вида `_curchar != '{'`), и
+                # наивный find() нашёл бы его первым, разрезав код пополам
+                # внутри литерала (см. adlparse.cpp::get_oplist).
+                brace_pos = (col - 1) if 0 < col <= len(ln) and ln[col - 1] == '{' else ln.find('{')
                 if brace_pos >= 0:
                     indent = re.match(r'^(\s*)', ln).group(1)
                     rest_after_brace = ln[brace_pos + 1:]
@@ -558,12 +589,20 @@ def main():
             elif op == "direct":
                 # case/default — вставить текст датчика сразу после ':'
                 # метки, без скобок (см. has_block=2 в probe_points.ql).
-                # ins_col = колонка_двоеточия + 1; если ':' стоит в КОНЦЕ строки
-                # (типичное `case N:` без кода после), col == len(ln)+1 — это
-                # валидная позиция «дописать в конец», поэтому граница len+1,
-                # а не len (иначе датчик молча не вставлялся бы — см. weekday_kind).
-                if 0 <= col <= len(ln) + 1:
-                    lines[idx] = ln[:col] + " " + text + ln[col:] + nl
+                # col (1-based) указывает на символ ПОСЛЕ ':' — переводим в
+                # 0-based ИНДЕКС этого символа (col - 1), как и везде при
+                # переходе из координат CodeQL в срез Python (см. "open":
+                # c = col - 1, чуть выше). Без этой поправки граница среза
+                # захватывала бы в префикс ещё и сам этот символ — обычно
+                # незаметно (пробел), но если после ':' нет пробела (см.
+                # `case ...metadata_type:return ...;` в c1_LIR.hpp), датчик
+                # разрезал бы пополам первое слово тела (`r`+датчик+`eturn`).
+                # При ':' в КОНЦЕ строки (`case N:`) shifted_col == len(ln) —
+                # валидная позиция «в конец», поэтому граница <= len(ln)
+                # (иначе датчик молча не вставлялся бы — см. weekday_kind).
+                shifted_col = col - 1
+                if 0 <= shifted_col <= len(ln):
+                    lines[idx] = ln[:shifted_col] + " " + text + ln[shifted_col:] + nl
         lines.insert(0, f'#include "__trace.h"{dominant_nl}')
         with open(fp, "w", encoding="utf-8", newline='') as f:
             f.write("".join(lines))
@@ -581,7 +620,11 @@ def main():
     _hdr = f'#define CQ_LANG "{args.lang}"\n' + _hdr
     (out / "__trace.h").write_text(_hdr, encoding="utf-8")
 
-    # 7. Карта датчиков
+    # 7. Карта датчиков. Вычитаем sid-ы, для которых разрешение
+    # inline_candidate (см. dropped_sids выше) не нашло надёжного места —
+    # без этого карта лгала бы про датчики, которых в реальном тексте нет
+    # (см. add_via_macro).
+    sensor_map = [sm for sm in sensor_map if sm[0] not in dropped_sids]
     with open(out / "Карта_датчиков.csv", "w", encoding="utf-8-sig", newline="") as fh:
         w = csv.writer(fh, delimiter=";")
         w.writerow(["sid", "№ ФО", "Запись (br)", "Файл", "Строка", "Тип"])
@@ -645,7 +688,7 @@ def main():
             pass
     if _pruned:
         print(f"[9] Удалено неинструментированных файлов: {_pruned}")
-    print(f"[OK] Инструментировано. Датчиков: {total_sensors}")
+    print(f"[OK] Инструментировано. Датчиков: {total_sensors - len(dropped_sids)}")
 
 
 if __name__ == "__main__":

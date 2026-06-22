@@ -241,7 +241,18 @@ predicate probe(
     not isMacroGeneratedControl(sw) and
     not sw.getEnclosingFunction().getName().indexOf("operator") = 0 and
     not sw.getEnclosingFunction().isCompilerGenerated() and
-    not sw.getEnclosingFunction().isInMacroExpansion()
+    not sw.getEnclosingFunction().isInMacroExpansion() and
+    // Сама МЕТКА может быть синтезирована макросом, даже если switch и
+    // функция — нет (см. REP8/REP16 в assembler_x86.cpp: один макровызов
+    // `case REP8(0xB8):` разворачивается в 8 НЕЗАВИСИМЫХ case-меток
+    // `case (0xB8)+0: case (0xB8)+1: ... case (0xB8)+7:`, физически
+    // занимающих одно и то же место в исходнике). У всех таких меток
+    // getLocation() указывает на ОДНО И ТО ЖЕ (или перекрывающееся) место
+    // вызова макроса — надёжного отдельного места для датчика КАЖДОЙ из
+    // них нет (несколько вставок на одну позицию ломают друг друга, как
+    // вставки сразу до и после общего ':'). Пропускаем такие метки.
+    not sc.isInMacroExpansion() and
+    (exists(sc.getExpr()) implies not sc.getExpr().isInMacroExpansion())
   |
     kind    = "branch" and
     func    = sw.getEnclosingFunction().getQualifiedName() and

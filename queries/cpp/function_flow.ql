@@ -221,7 +221,15 @@ where
   not isMacroGeneratedControl(s) and
   // То же для case/default, чей родительский switch порождён макросом.
   not (s instanceof SwitchCase and
-       exists(SwitchStmt sw | s.(SwitchCase).getSwitchStmt() = sw | sw.getExpr().isInMacroExpansion()))
+       exists(SwitchStmt sw | s.(SwitchCase).getSwitchStmt() = sw | sw.getExpr().isInMacroExpansion())) and
+  // И для САМОЙ метки, даже если switch и его выражение — нет (см. REP8/
+  // REP16 в assembler_x86.cpp: один макровызов `case REP8(0xB8):`
+  // разворачивается в 8 независимых case-меток, физически указывающих на
+  // одно и то же место вызова макроса — см. ту же проверку и подробный
+  // комментарий в probe_points.ql).
+  not (s instanceof SwitchCase and
+       (s.isInMacroExpansion() or
+        (exists(s.(SwitchCase).getExpr()) and s.(SwitchCase).getExpr().isInMacroExpansion())))
   // ПРИМ.: else-if (IfStmt в позиции else) НЕ исключается — это
   // самостоятельное ветвление, его нужно нумеровать как отдельный if (иначе
   // в Перечень_ветвей теряются все звенья цепочки кроме первого, а

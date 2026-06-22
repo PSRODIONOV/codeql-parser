@@ -100,6 +100,10 @@ int main() {
     std::cout << "clamp_val(15,0,10)   = " << clamp_val(15, 0, 10) << "\n";
     std::cout << "clamp_val(-3,0,10)   = " << clamp_val(-3, 0, 10) << "\n";
     std::cout << "clamp_val(5,0,10)    = " << clamp_val(5, 0, 10) << "\n";
+    std::cout << "brace_literal_guard  = " << brace_literal_guard('x', true) << "\n";
+    std::cout << "brace_literal_guard2 = " << brace_literal_guard('{', true) << "\n";
+    std::cout << "case_no_space_kind(9)= " << case_no_space_kind(9) << "\n";
+    std::cout << "case_no_space_kind(0)= " << case_no_space_kind(0) << "\n";
 
     // ---- negative_demo (НЕ должно инструментироваться) ----
     std::cout << "weekday_kind(0)      = " << weekday_kind(0) << "\n";  // case 0 (+fallthrough 6)
@@ -111,6 +115,9 @@ int main() {
     std::cout << "retry_goto(3)        = " << retry_goto(3) << "\n";
     std::cout << "macro_control(5)     = " << macro_control(5) << "\n";
     std::cout << "macro_control(-5)    = " << macro_control(-5) << "\n";
+    std::cout << "macro_generated_cases(10)= " << macro_generated_cases(10) << "\n";  // case из макроса
+    std::cout << "macro_generated_cases(20)= " << macro_generated_cases(20) << "\n";  // обычная метка
+    std::cout << "macro_generated_cases(0) = " << macro_generated_cases(0) << "\n";   // default
 
     // ---- unsafe_demo (опасные конструкции для сигнатурного анализа) ----
     run_unsafe("demo");

@@ -25,6 +25,14 @@ int count_positive(const std::vector<int>& v);   // if внутри замыка
 // --- рекурсия (ветвь + маршрут вызовов factorial -> factorial) ---
 long factorial(int n);
 
+// --- регрессия инструментатора: литерал '{' в условии на одной строке с
+// настоящей открывающей { тела (см. adlparse.cpp::get_oplist) ---
+bool brace_literal_guard(char c, bool flag);
+
+// --- регрессия инструментатора: case/default без пробела перед телом
+// (off-by-one в "direct", см. c1_LIR.hpp::as_BasicType) ---
+int case_no_space_kind(int x);
+
 // --- ветви в шаблонной функции (инструментируется по инстанцированию) ---
 template <class T>
 T clamp_val(T v, T lo, T hi) {

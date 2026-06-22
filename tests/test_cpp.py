@@ -10,11 +10,12 @@
 
 Золотые отчёты: reports/small-projects/cpp-branches/ (пути → basename).
 """
+import re
 import pytest
 from conftest import source_line, get_sig_line
 
 ALLOWED_TYPES = {"if", "else", "for", "while", "do", "try", "catch", "case", "default"}
-TOTAL_BRANCHES = 95
+TOTAL_BRANCHES = 100
 
 
 def _short(fo: str) -> str:
@@ -86,6 +87,30 @@ class TestBranchDetection:
         bad = {r.get("Тип") for r in cpp_branches_inventory} - ALLOWED_TYPES
         assert not bad, f"неожиданные типы ветвей: {bad}"
 
+    def test_brace_literal_in_condition_tracked(self, cpp_branches_inventory):
+        """Регрессия: символьный литерал '{' в условии на одной строке с
+        настоящей открывающей { тела (см. adlparse.cpp::get_oplist) не
+        должен мешать СТАТИЧЕСКОМУ определению ветви — if отслеживается."""
+        rows = branches_of(cpp_branches_inventory, "brace_literal_guard")
+        assert types_of(rows) == ["if"]
+
+    def test_case_no_space_before_body_tracked(self, cpp_branches_inventory):
+        """Регрессия: case/default без пробела перед телом (см.
+        c1_LIR.hpp::as_BasicType) — оба отслеживаются и пронумерованы 1, 2."""
+        rows = branches_of(cpp_branches_inventory, "case_no_space_kind")
+        t = types_of(rows)
+        assert len(rows) == 2 and t.count("case") == 1 and t.count("default") == 1
+        assert sorted(nums_of(rows), key=int) == ["1", "2"]
+
+    def test_macro_generated_case_labels_excluded(self, cpp_branches_inventory):
+        """Регрессия (REP8/REP16-паттерн, см. assembler_x86.cpp): case-метки,
+        развёрнутые из ОДНОГО макровызова в несколько (CASES4(10) -> 4
+        меток), исключаются целиком; обычная метка того же switch (case 20)
+        и default — отслеживаются как обычно (всего 2, не 6)."""
+        rows = branches_of(cpp_branches_inventory, "macro_generated_cases")
+        t = types_of(rows)
+        assert len(rows) == 2 and t.count("case") == 1 and t.count("default") == 1
+
 
 # ── Макро-ФО ─────────────────────────────────────────────────────────────────
 
@@ -109,18 +134,56 @@ class TestMacroFO:
         """Тело/{ из макроса, имя настоящее (macro_body) — ветвь if отслеживается."""
         assert any(r.get("Тип") == "if" for r in branches_of(cpp_branches_inventory, "macro_body"))
 
+    def test_self_contained_macro_fo_present_but_not_instrumented(self, cpp_branches_fo, cpp_branches_sensors):
+        """Регрессия (JAVA_INTEGER_OP-паттерн, см. globalDefinitions.hpp):
+        макрос, ОДНИМ вызовом разворачивающийся в целую функцию (имя —
+        АРГУМЕНТ макроса, без ## в отличие от get_answer/get_zero), остаётся
+        легитимным, различимым ФО в статике (есть в Перечень_ФО) — но не
+        получает датчика входа/выхода: нет надёжного места (тело общее для
+        ВСЕХ вызовов макроса), вставка должна молча пропускаться."""
+        names = {r.get("Объект", "") for r in cpp_branches_fo}
+        assert "add_via_macro" in names and "add_via_macro2" in names
+        fo_nums = {r.get("№ п/п") for r in cpp_branches_fo
+                   if r.get("Объект") in ("add_via_macro", "add_via_macro2")}
+        entry_fo_nums = {r.get("№ ФО") for r in cpp_branches_sensors if r.get("Запись (br)") == "0"}
+        assert not (fo_nums & entry_fo_nums)
+
 
 # ── Карта датчиков ───────────────────────────────────────────────────────────
 
 class TestSensorMap:
 
-    def test_case_sensors_inserted_and_numbered(self, cpp_branches_sensors):
-        """Баг #6: датчики case/default размещены и пронумерованы 1..8."""
+    def test_case_sensors_inserted_and_numbered(self, cpp_branches_sensors, cpp_branches_fo):
+        """Датчики case/default weekday_kind размещены и пронумерованы 1..8.
+        Отбор по № ФО (а не по имени файла) — negative_demo.cpp теперь
+        содержит ЕЩЁ один switch (macro_generated_cases, см. ниже)."""
+        fo_num = next(r.get("№ п/п") for r in cpp_branches_fo if r.get("Объект") == "weekday_kind")
         rows = [r for r in cpp_branches_sensors
-                if r.get("Файл") == "negative_demo.cpp"
-                and r.get("Тип") in ("case", "default")]
+                if r.get("№ ФО") == fo_num and r.get("Тип") in ("case", "default")]
         assert len(rows) == 8
         assert sorted((r.get("Запись (br)", "") for r in rows), key=int) == [str(i) for i in range(1, 9)]
+
+    def test_case_no_space_sensors_not_split(self, cpp_branches_sensors, cpp_branches_fo):
+        """Датчики case_no_space_kind (без пробела перед телом) размещены и
+        пронумерованы 1, 2 — статика подтверждает то же, что инструментатор
+        реально вставил (см. TestInstrumentorRegressionBugs — побайтовая
+        проверка, что 'return' при этом не разрезан)."""
+        fo_num = next(r.get("№ п/п") for r in cpp_branches_fo if r.get("Объект") == "case_no_space_kind")
+        rows = [r for r in cpp_branches_sensors
+                if r.get("№ ФО") == fo_num and r.get("Тип") in ("case", "default")]
+        assert len(rows) == 2
+        assert sorted((r.get("Запись (br)", "") for r in rows), key=int) == ["1", "2"]
+
+    def test_macro_generated_case_sensors_not_duplicated(self, cpp_branches_sensors, cpp_branches_fo):
+        """Регрессия (REP8-style, см. assembler_x86.cpp): case-метки из
+        ОДНОГО макровызова не порождают несколько датчиков на одну позицию
+        (раньше это рвало текст — __TRACE и до, и после ':'). Ровно 2
+        датчика (case 20, default), не 6 (4 из макроса + 2 обычных)."""
+        fo_num = next(r.get("№ п/п") for r in cpp_branches_fo if r.get("Объект") == "macro_generated_cases")
+        rows = [r for r in cpp_branches_sensors
+                if r.get("№ ФО") == fo_num and r.get("Тип") in ("case", "default")]
+        assert len(rows) == 2
+        assert sorted((r.get("Запись (br)", "") for r in rows), key=int) == ["1", "2"]
 
     def test_every_fo_has_entry_and_exit(self, cpp_branches_sensors):
         entries, exits = set(), set()
@@ -168,3 +231,63 @@ class TestSignatureAnalysis:
         unsafe_demo, ни одной записи из macro_demo.cpp."""
         locs = [r.get("Местоположение", "") for r in cpp_branches_signature]
         assert not any("macro_demo.cpp" in loc for loc in locs)
+
+
+# ── Побайтовая корректность вставки (инструментатор) ─────────────────────────
+# Каждый тест — конкретный баг instrument_c_make.py/instrument_cpp.py, найденный
+# и исправленный по факту: статика (Перечень_ветвей/Карта_датчиков) подтверждает,
+# что датчик НА МЕСТЕ, но не то, что вставленный текст не разрезал код пополам —
+# для этого нужен сам инструментированный исходник.
+
+class TestInstrumentorRegressionBugs:
+
+    def test_brace_literal_does_not_split_code(self, cpp_branches_instrumented_src):
+        """Баг: литерал '{' перед настоящей открывающей { на одной строке —
+        наивный поиск "{" с начала строки находил литерал первым и резал
+        код пополам внутри него (см. adlparse.cpp::get_oplist)."""
+        src = (cpp_branches_instrumented_src / "advanced_demo.cpp").read_text(encoding="utf-8")
+        assert "if (c != '{' && flag) {" in src, "условие if разрезано датчиком"
+        assert re.search(r"if \(c != '\{' && flag\) \{\s*\n\s*__TRACE\(\d+, \d+, \d+\);", src), (
+            "датчик не сразу после настоящей { (вставлен по литералу?)")
+
+    def test_case_no_space_does_not_split_keyword(self, cpp_branches_instrumented_src):
+        """Баг: off-by-one в обработчике "direct" разрезал первое слово тела
+        (return -> r + датчик + eturn), когда после ':' нет пробела (см.
+        c1_LIR.hpp::as_BasicType)."""
+        src = (cpp_branches_instrumented_src / "advanced_demo.cpp").read_text(encoding="utf-8")
+        assert "case 9: __TRACE" in src and "return 99;" in src
+        assert "default: __TRACE" in src and "return -1;" in src
+        assert "eturn" not in src.replace("return", "")
+        assert not re.search(r":\s*\w\s+__TRACE\(\d+, \d+, \d+\);\w+\b", src), (
+            "датчик разрезал ключевое слово тела case/default")
+
+    def test_self_contained_macro_call_not_corrupted(self, cpp_branches_instrumented_src):
+        """Баг: самодостаточный макрос (MAKE_ADDER), разворачивающийся в
+        ЦЕЛУЮ функцию одним вызовом, раньше оборачивался в "{ датчик;
+        ВЫЗОВ }" — вложенное определение функции внутри блока (ошибка
+        сборки). Строка вызова должна остаться буквально неизменной."""
+        src = (cpp_branches_instrumented_src / "macro_demo.cpp").read_text(encoding="utf-8")
+        assert re.search(r"^MAKE_ADDER\(add_via_macro\)\s*$", src, re.M), "вызов MAKE_ADDER изменён"
+        assert re.search(r"^MAKE_ADDER\(add_via_macro2\)\s*$", src, re.M), "вызов MAKE_ADDER изменён"
+
+    def test_macro_generated_case_call_not_corrupted(self, cpp_branches_instrumented_src):
+        """Регрессия (REP8-style): вызов макроса, разворачивающегося в
+        несколько case-меток, не должен получать датчик ДО или ПОСЛЕ ':'
+        (раньше — __TRACE с обеих сторон общего ':')."""
+        src = (cpp_branches_instrumented_src / "negative_demo.cpp").read_text(encoding="utf-8")
+        assert re.search(r"^\s*case CASES4\(10\):\s*//", src, re.M), "вызов CASES4(10): изменён"
+
+    def test_oneline_if_else_no_brace_sensors_not_overlapping(self, cpp_branches_instrumented_src):
+        """Баг: утечка col_shifts между несколькими open/close-вставками на
+        ОДНОЙ строке (`if (...) r=...; else r=...;` без скобок) переносила
+        чужой сдвиг на не связанную с ним вставку и рвала уже вставленный
+        __TRACE() соседней ветви (закрывающая } влезала в его аргументы)."""
+        src = (cpp_branches_instrumented_src / "oneline_demo.cpp").read_text(encoding="utf-8")
+        m = re.search(r"if_else_oneline_nn\(int x\) \{.*?\n(.*?)\n\s*return r;", src, re.S)
+        assert m, "if_else_oneline_nn не найдена в инструментированном исходнике"
+        body = m.group(1)
+        assert not re.search(r"__TRACE\([^)]*[{}][^)]*\)", body), (
+            f"скобка { {} } влезла в аргументы __TRACE: {body!r}")
+        assert body.count("{") == body.count("}"), f"несбалансированные {{}}: {body!r}"
+        assert re.search(r"if \(x % 2 == 0\) \{ __TRACE\(\d+, \d+, \d+\); r = x / 2; \}"
+                          r" else \{ __TRACE\(\d+, \d+, \d+\); r = x \* 3 \+ 1; \}", body)
