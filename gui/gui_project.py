@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1093,11 +1094,16 @@ class DynamicTab(QWidget):
             # Белый/чёрный список файлов — тот же, что использовался для
             # статического анализа (см. apply_file_filters/set_file_filters),
             # чтобы оба этапа видели одно и то же подмножество файлов.
+            # Тег трасс = имя проекта + язык: несколько кодовых баз C++ в
+            # разных проектах пишут трассы в один $HOME, префикс не даёт
+            # им перепутаться при последующем разборе (см. cqtrace/CQ_LANG).
+            trace_tag = re.sub(r"[^\w.-]+", "_", meta.get("name", "") or lang) + f"-{lang}"
             cmd = [sys.executable, str(ROOT / "dynamic" / script),
                    "--db", meta["codeql_db_path"],
                    "--reports", str(self.proj.reports_static),
                    "--out", str(self.proj.src_instrumented),
                    "--codeql", _codeql(), "--lang", lang,
+                   "--trace-tag", trace_tag,
                    "--pattern", meta.get("pattern", "")]
             # Геометрия точек вставки — из сырых данных project.db (раздел
             # 'probe'), без отдельного запроса probe_points.ql к CodeQL-БД.

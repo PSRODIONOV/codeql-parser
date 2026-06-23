@@ -272,6 +272,10 @@ def main():
     ap.add_argument("--out", required=True, help="каталог рабочей (инструментируемой) копии")
     ap.add_argument("--codeql", default="codeql")
     ap.add_argument("--lang", default="cpp")
+    ap.add_argument("--trace-tag", default="",
+                    help="Префикс имени файла трасс (CQ_LANG), напр. <project>-cpp — "
+                         "чтобы трассы разных кодовых баз/проектов не путались "
+                         "в общем $HOME. По умолчанию = --lang.")
     ap.add_argument("--pattern", default="", help="Паттерн пути проекта для isProjectFile")
     ap.add_argument("--include-list", default="", help="Текстовый файл — белый список путей (по одному на строку)")
     ap.add_argument("--exclude-list", default="", help="Текстовый файл — чёрный список путей (по одному на строку)")
@@ -648,9 +652,11 @@ def main():
     #    достаточно '#include "__trace.h"' везде; заголовок можно один раз
     #    положить в /usr/include, и он будет виден отовсюду (см. шапку
     #    __trace_singlehdr.h). Заодно даёт маршруты R/C для route_match.
-    #    Префикс языка в имени файла трасс (<lang>-<ts>-<pid>.log) — под --lang.
+    #    Префикс в имени файла трасс (<tag>-<ts>-<pid>.log) — под --trace-tag
+    #    (по умолчанию = --lang); отдельный проект/кодовая база может задать
+    #    свой тег, чтобы трассы разных проектов в общем $HOME не путались.
     _hdr = (RUNTIME / "__trace_singlehdr.h").read_text(encoding="utf-8")
-    _hdr = f'#define CQ_LANG "{args.lang}"\n' + _hdr
+    _hdr = f'#define CQ_LANG "{args.trace_tag or args.lang}"\n' + _hdr
     (out / "__trace.h").write_text(_hdr, encoding="utf-8")
 
     # 7. Карта датчиков. Вычитаем sid-ы, для которых разрешение

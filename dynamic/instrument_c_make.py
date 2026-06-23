@@ -261,6 +261,10 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--codeql", default="codeql")
     ap.add_argument("--lang", default="cpp")
+    ap.add_argument("--trace-tag", default="",
+                    help="Префикс имени файла трасс (CQ_LANG), напр. <project>-cpp — "
+                         "чтобы трассы разных кодовых баз/проектов не путались "
+                         "в общем $HOME. По умолчанию = --lang.")
     ap.add_argument("--pattern", default="", help="Паттерн пути проекта для isProjectFile")
     ap.add_argument("--include-list", default="", help="Текстовый файл — белый список путей (по одному на строку)")
     ap.add_argument("--exclude-list", default="", help="Текстовый файл — чёрный список путей (по одному на строку)")
@@ -416,7 +420,7 @@ def main():
     # заголовке (weak-символы) — пользователь сам копирует файл в системный
     # include-путь (/usr/include), --header-dir/--impl-file не нужны.
     rt = (RUNTIME / "__trace_singlehdr.h").read_text(encoding="utf-8")
-    rt = rt.replace('#define CQ_LANG "cpp"', f'#define CQ_LANG "{args.lang}"')
+    rt = rt.replace('#define CQ_LANG "cpp"', f'#define CQ_LANG "{args.trace_tag or args.lang}"')
     (out / "__trace.h").write_text(rt, encoding="utf-8")
 
     # Применяем вставки + подключаем рантайм.
