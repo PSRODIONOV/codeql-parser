@@ -15,7 +15,7 @@ import pytest
 from conftest import source_line, get_sig_line
 
 ALLOWED_TYPES = {"if", "else", "for", "while", "do", "try", "catch", "case", "default"}
-TOTAL_BRANCHES = 101
+TOTAL_BRANCHES = 104
 
 
 def _short(fo: str) -> str:
@@ -329,3 +329,21 @@ class TestInstrumentorRegressionBugs:
         src = (cpp_branches_instrumented_src / "macro_demo.cpp").read_text(encoding="utf-8")
         assert re.search(r'^\s*log_message\("guarded call", CHECK\);\s*$', src, re.M), (
             "вызов log_message(..., CHECK) изменён/разрезан")
+
+    def test_while_try_no_brace_catch_not_orphaned(self, cpp_branches_instrumented_src):
+        """Баг #8: `while(...) try {...} catch(...) {...}` без своих {} вокруг
+        while (тело while — это сам TryStmt) — CodeQL даёт TryStmt.getLocation()
+        только до конца try-блока, БЕЗ catch-обработчика, поэтому закрывающая
+        '}' обёртки одиночного оператора (has_block=0) могла попасть ПРЯМО
+        ПЕРЕД catch — он оставался "осиротевшим" вне фигурных скобок while
+        (см. rikdataset.cpp, GDAL/RIK, RIKRasterBand::IReadBlock). catch
+        должен остаться ВНУТРИ обёртки, сразу после try-блока."""
+        src = (cpp_branches_instrumented_src / "exception_demo.cpp").read_text(encoding="utf-8")
+        m = re.search(r"while_try_no_brace\(int n\) \{.*?\n(.*?)\n\s*return total;", src, re.S)
+        assert m, "while_try_no_brace не найдена в инструментированном исходнике"
+        body = m.group(1)
+        assert body.count("{") == body.count("}"), f"несбалансированные {{}}: {body!r}"
+        assert re.search(r"\}\s*catch \(const std::exception&\) \{", body), (
+            "catch оторван от try-блока (закрывающая '}' обёртки вставлена раньше catch)")
+        assert re.search(r"catch \(const std::exception&\) \{\s*\n\s*__TRACE\(\d+, \d+, \d+\);", body), (
+            "датчик catch не сразу после его {")

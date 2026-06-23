@@ -48,6 +48,7 @@ int main() {
     std::cout << "try_multiple_catch(0)= " << try_multiple_catch(0) << "\n";
     std::cout << "nested_try(4)        = " << nested_try(4) << "\n";
     std::cout << "nested_try(0)        = " << nested_try(0) << "\n";
+    std::cout << "while_try_no_brace(5)= " << while_try_no_brace(5) << "\n";
     std::cout << "try_with_loop(hello) = " << try_with_loop("hello") << "\n";
     std::cout << "try_with_loop(xyz)   = " << try_with_loop("xyz") << "\n";
 

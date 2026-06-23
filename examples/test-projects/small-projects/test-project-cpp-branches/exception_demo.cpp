@@ -55,6 +55,30 @@ int nested_try(int x) {
     return r;
 }
 
+// Регресс бага #8: while(...) try { ... } catch (...) { ... } БЕЗ своих {}
+// вокруг тела while (тело while — это сам TryStmt). CodeQL для TryStmt.
+// getLocation() даёт конец ТОЛЬКО try-блока, не включая catch-обработчик,
+// поэтому закрывающая '}' обёртки одиночного оператора (has_block=0) могла
+// попасть ПРЯМО ПЕРЕД catch — он оставался "осиротевшим" вне фигурных
+// скобок while, и сборка ломалась. Прототип: GDAL/RIK rikdataset.cpp
+// (RIKRasterBand::IReadBlock — while(...) try {...} catch(...) {...}).
+// 4 отслеживаемые ветви: while (тело — try), try, if, catch.
+int while_try_no_brace(int n) {
+    int total = 0;
+    int i = 0;
+    while (i < n)                  // ветвь #1 (while), тело — TryStmt без {}
+    try {                           // ветвь #2 (try)
+        if (i == 2) {               // ветвь #3 (if)
+            throw std::runtime_error("skip");
+        }
+        total += i;
+        ++i;
+    } catch (const std::exception&) { // ветвь #4 (catch)
+        ++i;                         // пропустить проблемный элемент
+    }
+    return total;
+}
+
 // 3 отслеживаемые ветви: тело try + тело for + вложенный if.
 int try_with_loop(const std::string& s) {
     int vowels = 0;

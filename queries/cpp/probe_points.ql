@@ -122,6 +122,38 @@ string branchType(Stmt s) {
   s instanceof TryStmt  and result = "try"
 }
 
+/** Последний (по тексту) catch-обработчик данного TryStmt. */
+predicate isLastHandler(TryStmt t, Handler h) {
+  h.getTryStmt() = t and
+  not exists(Handler h2 |
+    h2.getTryStmt() = t and
+    h2.getLocation().getStartLine() > h.getLocation().getStartLine()
+  )
+}
+
+/**
+ * Истинный конец оператора body, оборачиваемого как одиночный (без своих
+ * {}) — нужен для закрывающей '}' обёртки датчика (has_block=0). Для
+ * большинства Stmt body.getLocation() и есть этот конец. ИСКЛЮЧЕНИЕ —
+ * TryStmt без собственных {} вокруг (типичный паттерн без библиотек
+ * исключений: `while(...) try { ... } catch(...) { ... }`, без обёртки):
+ * CodeQL даёт TryStmt.getLocation() только до конца try-блока, БЕЗ
+ * catch-обработчиков, поэтому закрывающая '}' обёртки инструментатором
+ * ставилась прямо перед catch — он оставался "осиротевшим" вне фигурных
+ * скобок цикла/if, и сборка ломалась (см. rikdataset.cpp, GDAL/RIK).
+ * Поэтому для TryStmt берём конец ПОСЛЕДНЕГО catch-блока.
+ */
+predicate properStmtEnd(Stmt body, int endLine, int endCol) {
+  not body instanceof TryStmt and
+  endLine = body.getLocation().getEndLine() and
+  endCol = body.getLocation().getEndColumn()
+  or
+  exists(Handler last | isLastHandler(body, last) |
+    endLine = last.getBlock().getLocation().getEndLine() and
+    endCol = last.getBlock().getLocation().getEndColumn()
+  )
+}
+
 predicate probe(
   string kind, string func, string file, int refLine,
   int insLine, int insCol, int hasBlock, string btype,
@@ -189,8 +221,7 @@ predicate probe(
     insLine = body.getLocation().getStartLine() and
     insCol  = body.getLocation().getStartColumn() and
     btype   = branchType(s) and
-    endLine = body.getLocation().getEndLine() and
-    endCol  = body.getLocation().getEndColumn() and
+    properStmtEnd(body, endLine, endCol) and
     (
       body instanceof BlockStmt and hasBlock = 1
       or
@@ -218,8 +249,7 @@ predicate probe(
     insLine = body.getLocation().getStartLine() and
     insCol  = body.getLocation().getStartColumn() and
     btype   = "else" and
-    endLine = body.getLocation().getEndLine() and
-    endCol  = body.getLocation().getEndColumn() and
+    properStmtEnd(body, endLine, endCol) and
     (
       body instanceof BlockStmt and hasBlock = 1
       or

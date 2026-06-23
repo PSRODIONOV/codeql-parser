@@ -16,6 +16,9 @@ int try_multiple_catch(int code);
 // Вложенные try.
 int nested_try(int x);
 
+// Регресс бага #8: while(...) try {...} catch(...) {...} без {} вокруг while.
+int while_try_no_brace(int n);
+
 // try + цикл + if внутри try-блока (комбинация ветвей).
 int try_with_loop(const std::string& s);
 

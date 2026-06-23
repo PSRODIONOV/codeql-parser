@@ -80,6 +80,7 @@
 | `simple_try`         | try#1, if#2                    | 2 |
 | `try_multiple_catch` | try#1, if#2, if#3, if#4         | 4 |
 | `nested_try`         | try#1 (внешний), try#2, if#3    | 3 |
+| `while_try_no_brace` | while#1 (тело — try), try#2, if#3 | 3 |
 | `try_with_loop`      | try#1, for#2, if#3, if#4        | 4 |
 
 ### pipeline.cpp
@@ -159,8 +160,8 @@ range-based for, `?:`, `&&`/`\|\|`, `if` из макроса, case-метки и
 
 ### Итог (проверено на БД)
 
-Статический `Перечень_ветвей.csv` для этого проекта содержит **101 ветвь** в
-67 ФО; инструментатор размещает **240 датчиков** (вход/выход + ветви) — 3
+Статический `Перечень_ветвей.csv` для этого проекта содержит **104 ветви** в
+68 ФО; инструментатор размещает **246 датчиков** (вход/выход + ветви) — 3
 ФО (`macro_full_body`, `add_via_macro`, `add_via_macro2`) легитимны в
 статике, но без датчика (самодостаточный макрос, нет надёжного места для
 вставки), плюс 1 ветвь (`check_macro_guard`, if с телом на HotSpot-идиоме
@@ -205,7 +206,7 @@ make
 
 ## Регрессия инструментатора (найденные и исправленные баги)
 
-Фикстуры ниже воспроизводят 7 конкретных багов `instrument_c_make.py`/
+Фикстуры ниже воспроизводят 8 конкретных багов `instrument_c_make.py`/
 `instrument_cpp.py`/`core/codeql_analyzer.py`/`queries/cpp/*.ql`, найденных на
 реальных проектах (HotSpot/gosjava) и закреплённых здесь как регресс
 (`tests/test_cpp.py`, классы `TestInstrumentorRegressionBugs` — побайтовая
@@ -221,3 +222,4 @@ make
 | 5 | Одна метка `case MACRO(x):` разворачивается макросом в несколько `case` — все указывают на одно место, несколько датчиков ломали текст вокруг общего `:` | `macro_generated_cases`/`CASES4` (`negative_demo.cpp`) | `REP8`/`REP16` (`assembler_x86.cpp`, HotSpot) |
 | 6 | `sensor_map`/`Карта_датчиков.csv` заполнялся ДО того, как стало известно, удастся ли вставить датчик (баг 2/X-macro) — карта лгала о датчиках, которых в коде нет, и портила Покрытие_ФО (ложное «не покрыт» вместо «не инстр.») | те же ФО, что в баге 2 | — (найдено при добавлении регресса для бага 2) |
 | 7 | Макрос — последний аргумент вызова, САМ закрывающий список аргументов и порождающий `if` внутри своего раскрытия (`f(args, CHECK)` -> `f(args, THREAD); if (...) return; ...)`). CodeQL репортует конец одиночного оператора-тела `if` (hasBlock=0) сразу после "CHECK" — ВНУТРИ списка аргументов вызова, а не после настоящего `');'`. Обёртка `{ датчик; ВЫЗОВ }` по такой координате вставляла `}` внутрь аргументов | `check_macro_guard` (`macro_demo.cpp`) | `CHECK`/`CHECK_`/`RETURN`/`TRAPS` (`classFileParser.cpp::classfile_parse_error`, HotSpot) |
+| 8 | `while(...) try {...} catch(...) {...}` без своих `{}` вокруг while (тело while — сам `TryStmt`). CodeQL даёт `TryStmt.getLocation()` только до конца try-блока, БЕЗ catch-обработчика, поэтому закрывающая `}` обёртки одиночного оператора (hasBlock=0) попадала ПРЯМО ПЕРЕД `catch` — он оставался "осиротевшим" вне фигурных скобок while, сборка ломалась (`expected 'catch' before '}' token`). Фикс — `queries/cpp/probe_points.ql::properStmtEnd()` берёт конец ПОСЛЕДНЕГО catch-блока вместо `TryStmt.getLocation()` | `while_try_no_brace` (`exception_demo.cpp`) | `rikdataset.cpp::RIKRasterBand::IReadBlock` (GDAL/RIK) |
