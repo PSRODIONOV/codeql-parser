@@ -160,6 +160,49 @@ def test_coverage_roundtrip(proj):
     assert t["branch_total"] == 2 and t["branch_covered"] == 1
 
 
+def test_coverage_totals_excludes_not_instrumented(proj):
+    """fo_total/branch_total — ВСЕ объекты статики (включая "не инстр."),
+    fo_instrumented/branch_instrumented — без них (см. coverage_report.py:
+    fo_status/br_status проставляют "не инстр." самодостаточным макросам/
+    идиоме CHECK, у которых нет датчика)."""
+    proj.save_coverage(
+        fo_rows=[(1, "foo", "да"), (2, "bar", "нет"), (3, "macro_fo", "не инстр.")],
+        branch_rows=[(1, 1, "if", "f.cpp", "10", "да"),
+                     (1, 2, "if", "f.cpp", "20", "не инстр.")],
+        summary_rows=[],
+    )
+    t = proj.coverage_totals()
+    assert t["fo_total"] == 3 and t["fo_instrumented"] == 2 and t["fo_covered"] == 1
+    assert t["branch_total"] == 2 and t["branch_instrumented"] == 1 and t["branch_covered"] == 1
+
+
+def test_clear_dynamic_coverage(proj):
+    """Обнуление покрытия: трассы (БД + файлы в traces_dir) и
+    coverage_*-таблицы очищаются; instrumented/src-instrumented — нет."""
+    proj.traces_dir.mkdir(parents=True, exist_ok=True)
+    (proj.traces_dir / "run-1.log").write_text("hit", encoding="utf-8")
+    proj.add_trace("run-1.log", 1)
+    proj.save_coverage(
+        fo_rows=[(1, "Calculator.add", "да")],
+        branch_rows=[(1, 1, "if", "calc.py", "10", "да")],
+        summary_rows=[(1, "Calculator.add", 1, 1, "100.0%")],
+    )
+    proj.set_dynamic_state(instrumented=True, status="done")
+    proj.reports_dynamic.mkdir(parents=True, exist_ok=True)
+    (proj.reports_dynamic / "Покрытие_ФО.csv").write_text("x", encoding="utf-8")
+
+    proj.clear_dynamic_coverage()
+
+    assert proj.trace_count() == 0
+    assert list(proj.traces_dir.glob("*")) == []
+    assert not (proj.reports_dynamic / "Покрытие_ФО.csv").exists()
+    t = proj.coverage_totals()
+    assert t["fo_total"] == 0 and t["branch_total"] == 0
+    st = proj.get_dynamic_state()
+    assert st["status"] == "none"
+    assert st["instrumented"] == 1  # инструментация не сбрасывается
+
+
 def test_dynamic_state_roundtrip(proj):
     proj.set_dynamic_state(branches_enabled=True, extra_args="--foo", instrumented=True)
     st = proj.get_dynamic_state()

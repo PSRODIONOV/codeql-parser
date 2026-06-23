@@ -934,9 +934,17 @@ class DynamicTab(QWidget):
         sg.addWidget(self.br_cov_lbl, 2, 1)
         lay.addWidget(stats_group)
 
+        _crow = QHBoxLayout()
         self.coverage_btn = QPushButton("📊 Создать отчёты покрытия")
         self.coverage_btn.clicked.connect(self.build_coverage)
-        lay.addWidget(self.coverage_btn)
+        self.reset_coverage_btn = QPushButton("🗑 Обнулить покрытие")
+        self.reset_coverage_btn.setToolTip(
+            "Удалить все добавленные трассы и отчёты покрытия. "
+            "Инструментация проекта не затрагивается.")
+        self.reset_coverage_btn.clicked.connect(self._reset_coverage)
+        _crow.addWidget(self.coverage_btn)
+        _crow.addWidget(self.reset_coverage_btn)
+        lay.addLayout(_crow)
 
         self.log = QTextEdit(); self.log.setReadOnly(True)
         lay.addWidget(self.log)
@@ -1001,10 +1009,25 @@ class DynamicTab(QWidget):
     def _refresh_counts(self):
         self.trace_count_lbl.setText(str(self.proj.trace_count()))
         t = self.proj.coverage_totals()
+        # else-ветка нужна, иначе после обнуления покрытия (см.
+        # _reset_coverage) лейблы остаются со старым значением — счётчик
+        # раньше мог только расти, поэтому отсутствие "сброса в —" не
+        # проявлялось до появления самого обнуления.
+        # Показываем покрыто/инструментировано и рядом — всего по статике:
+        # без этого процент считался бы относительно ВСЕХ объектов статики
+        # (включая "не инстр." — самодостаточные макросы, идиома CHECK и
+        # т.п.), что не совпадало бы с тем, что печатает coverage_report.py
+        # в лог (см. dynamic/coverage_report.py).
         if t["fo_total"]:
-            self.fo_cov_lbl.setText(f"{t['fo_covered']}/{t['fo_total']}")
+            self.fo_cov_lbl.setText(
+                f"{t['fo_covered']}/{t['fo_instrumented']} (всего по статике {t['fo_total']})")
+        else:
+            self.fo_cov_lbl.setText("—")
         if t["branch_total"]:
-            self.br_cov_lbl.setText(f"{t['branch_covered']}/{t['branch_total']}")
+            self.br_cov_lbl.setText(
+                f"{t['branch_covered']}/{t['branch_instrumented']} (всего по статике {t['branch_total']})")
+        else:
+            self.br_cov_lbl.setText("—")
 
     # ── Действия ─────────────────────────────────────────────────────────────
     def instrument(self):
@@ -1130,6 +1153,22 @@ class DynamicTab(QWidget):
             self.proj.add_trace(Path(f).name, lc)
         self.log.append(f"➕ Добавлено трасс: {len(files)} (всего {self.proj.trace_count()})")
         self._refresh_counts()
+
+    def _reset_coverage(self):
+        if self.proj.trace_count() == 0 and self.proj.coverage_totals()["fo_total"] == 0:
+            QMessageBox.information(self, "Обнуление покрытия", "Покрытие уже пустое.")
+            return
+        if QMessageBox.question(
+                self, "Обнулить покрытие",
+                "Удалить все добавленные трассы и отчёты покрытия?\n\n"
+                "Инструментация проекта (src-instrumented) НЕ затрагивается — "
+                "повторно инструментировать не нужно, можно сразу добавлять новые трассы.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        self.proj.clear_dynamic_coverage()
+        self.win.refresh_stats()
+        self._refresh_counts()
+        self.log.append("🗑 Покрытие обнулено: трассы и отчёты покрытия удалены.")
 
     def build_coverage(self):
         traces = list(self.proj.traces_dir.glob("*"))

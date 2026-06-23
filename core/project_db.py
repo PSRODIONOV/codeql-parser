@@ -448,17 +448,53 @@ class ProjectDB:
                       "VALUES (?,?,?,?,?)", summary_rows)
         c.commit()
 
+    def clear_dynamic_coverage(self):
+        """Обнулить динамическое покрытие: трассы (БД-реестр + скопированные
+        файлы в traces_dir) и производные отчёты покрытия (БД-таблицы
+        coverage_*/d_flowcharts НЕ трогаем — это статика) + CSV в
+        reports/dynamic. Инструментация (src-instrumented, instrumented=1
+        в dynamic_state) НЕ затрагивается: повторно инструментировать
+        проект не нужно — можно сразу добавлять новые трассы "с нуля"."""
+        c = self.conn
+        c.execute("DELETE FROM traces")
+        c.execute("DELETE FROM coverage_fo")
+        c.execute("DELETE FROM coverage_branch")
+        c.execute("DELETE FROM coverage_summary")
+        c.commit()
+        if self.traces_dir.exists():
+            for f in self.traces_dir.iterdir():
+                if f.is_file():
+                    f.unlink()
+        if self.reports_dynamic.exists():
+            for f in self.reports_dynamic.iterdir():
+                if f.is_file() and f.suffix == ".csv":
+                    f.unlink()
+        # Покрытие нужно строить заново; instrumented не сбрасываем.
+        self.set_dynamic_state(status="none")
+
     def coverage_totals(self) -> Dict[str, int]:
-        """Сводные счётчики покрытия для статистики GUI."""
+        """Сводные счётчики покрытия для статистики GUI.
+
+        *_total — ВСЕ объекты из статики (coverage_fo/branch содержит
+        строку на каждый ФО/ветвь из Перечень_ФО/Перечень_ветвей.csv,
+        включая "не инстр."). *_instrumented — подмножество с реально
+        поставленным датчиком (без "не инстр." — самодостаточные макросы,
+        идиома CHECK и т.п., см. dynamic/coverage_report.py). Оба числа
+        нужны рядом: иначе непонятно, что покрытие считается ТОЛЬКО среди
+        инструментированных, а не среди всех объектов статики."""
         c = self.conn
         fo_total = c.execute("SELECT COUNT(*) n FROM coverage_fo").fetchone()["n"]
+        fo_instr = c.execute(
+            "SELECT COUNT(*) n FROM coverage_fo WHERE covered!='не инстр.'").fetchone()["n"]
         fo_cov = c.execute(
             "SELECT COUNT(*) n FROM coverage_fo WHERE covered='да'").fetchone()["n"]
         br_total = c.execute("SELECT COUNT(*) n FROM coverage_branch").fetchone()["n"]
+        br_instr = c.execute(
+            "SELECT COUNT(*) n FROM coverage_branch WHERE covered!='не инстр.'").fetchone()["n"]
         br_cov = c.execute(
             "SELECT COUNT(*) n FROM coverage_branch WHERE covered='да'").fetchone()["n"]
-        return {"fo_total": fo_total, "fo_covered": fo_cov,
-                "branch_total": br_total, "branch_covered": br_cov}
+        return {"fo_total": fo_total, "fo_instrumented": fo_instr, "fo_covered": fo_cov,
+                "branch_total": br_total, "branch_instrumented": br_instr, "branch_covered": br_cov}
 
 
 def _now() -> str:
