@@ -1097,7 +1097,8 @@ class DynamicTab(QWidget):
             # Тег трасс = имя проекта + язык: несколько кодовых баз C++ в
             # разных проектах пишут трассы в один $HOME, префикс не даёт
             # им перепутаться при последующем разборе (см. cqtrace/CQ_LANG).
-            trace_tag = re.sub(r"[^\w.-]+", "_", meta.get("name", "") or lang) + f"-{lang}"
+            _proj_tag = re.sub(r"[^\w.-]+", "_", meta.get("name", "") or lang)
+            trace_tag = _proj_tag if _proj_tag.endswith(f"-{lang}") else f"{_proj_tag}-{lang}"
             cmd = [sys.executable, str(ROOT / "dynamic" / script),
                    "--db", meta["codeql_db_path"],
                    "--reports", str(self.proj.reports_static),
