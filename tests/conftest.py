@@ -182,6 +182,36 @@ def cpp_branches_instrumented_src():
         ROOT / "examples" / "workspace" / "test-project-cpp-branches" / "instrumented-sources",
     )
 
+# ── Проект ветвей Java (test-project-java-branches) — инструментаторный регресс
+# Золотые отчёты: reports/small-projects/java-branches/ (пути → basename).
+# Минимальная фикстура (см. java-инструментатор по аналогии с C++): branches
+# if/else/for/while/try, перегрузка одноимённых методов (дисамбигуация по
+# файлу+строке), конструктор с явным super().
+
+@pytest.fixture(scope="session")
+def java_branches_inventory():
+    return load_report("java-branches", "Перечень_ветвей.csv")
+
+@pytest.fixture(scope="session")
+def java_branches_coverage():
+    return load_report("java-branches", "Покрытие_ветвей.csv")
+
+@pytest.fixture(scope="session")
+def java_branches_sensors():
+    return load_report("java-branches", "Карта_датчиков.csv")
+
+@pytest.fixture(scope="session")
+def java_branches_fo():
+    return load_report("java-branches", "Перечень_ФО(процедур_функций).csv")
+
+@pytest.fixture(scope="session")
+def java_branches_instrumented_src():
+    return _first_existing(
+        ROOT / "workspace" / "test-project-java-branches" / "instrumented-sources",
+        ROOT / "examples" / "workspace" / "test-project-java-branches" / "instrumented-sources",
+    )
+
+
 @pytest.fixture(scope="session")
 def java_fo():
     return load_report("java", "Перечень_ФО(процедур_функций).csv")

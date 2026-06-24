@@ -23,11 +23,14 @@ import java.util.List;
  * пишутся маршруты: "R fo:b1>b2>..." (ветви) и "C fo:fo>c1>c2>..." (вызовы);
  * подряд идущие повторы схлопываются (циклы/рекурсия), уникальные — 1,2,4,8… раз.
  * Стек кадров — ThreadLocal (корректно при многопоточности).
- * Трассы: <user.home>/java-<timestamp>-<pid>.log, ротация 100 МБ.
+ * Трассы: <user.home>/<LANG>-<timestamp>-<pid>.log, ротация 100 МБ. LANG —
+ * тег трасс (по умолч. "java"), задаётся --trace-tag инструментатора, чтобы
+ * трассы нескольких проектов в общем $HOME не путались (см. CQ_LANG/
+ * __trace_singlehdr.h у C/C++ — тот же приём).
  */
 public final class Cqtrace {
     private static final long LIMIT = 100L * 1024 * 1024;
-    private static final String LANG = "java";
+    private static final String LANG = "@LANG@";
     private static final HashMap<Long, Long> cnt = new HashMap<>();
     private static final HashMap<String, Long> rsig = new HashMap<>();
     private static final Object lock = new Object();

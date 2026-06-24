@@ -1045,13 +1045,13 @@ class DynamicTab(QWidget):
         meta = self.proj.get_project()
         lang = meta.get("language", "cpp")
 
-        # Для cpp каталог исходников не нужен — инструментатор сам берёт их
-        # из src.zip внутри CodeQL БД (точный снэпшот того, что реально
-        # анализировал CodeQL, включая файлы, появляющиеся только во время
-        # сборки — см. core/file_lists.py). Для остальных языков (php/python/
-        # js/java) копия с диска пока нужна, как и раньше.
+        # Для cpp и java каталог исходников не нужен — инструментатор сам
+        # берёт их из src.zip внутри CodeQL БД (точный снэпшот того, что
+        # реально анализировал CodeQL, включая файлы, появляющиеся только во
+        # время сборки — см. core/file_lists.py). Для остальных языков
+        # (php/python/js) копия с диска пока нужна, как и раньше.
         orig = self.proj.orig_sources
-        if lang != "cpp":
+        if lang not in ("cpp", "java"):
             if not self.src_zone.path:
                 QMessageBox.warning(self, "Нет исходников", "Укажите каталог исходников.")
                 return
@@ -1088,15 +1088,16 @@ class DynamicTab(QWidget):
                    "--out", str(self.proj.src_instrumented),
                    "--joern", _joern(), "--lang", lang,
                    "--pattern", meta.get("pattern", "")]
-        elif lang == "cpp":
+        elif lang in ("cpp", "java"):
             # Каталог исходников не передаём — instrument_c_make.py/
-            # instrument_cpp.py извлекают дерево прямо из src.zip БД.
-            # Белый/чёрный список файлов — тот же, что использовался для
-            # статического анализа (см. apply_file_filters/set_file_filters),
-            # чтобы оба этапа видели одно и то же подмножество файлов.
-            # Тег трасс = имя проекта + язык: несколько кодовых баз C++ в
-            # разных проектах пишут трассы в один $HOME, префикс не даёт
-            # им перепутаться при последующем разборе (см. cqtrace/CQ_LANG).
+            # instrument_cpp.py/instrument_java.py извлекают дерево прямо из
+            # src.zip БД. Белый/чёрный список файлов — тот же, что
+            # использовался для статического анализа (см.
+            # apply_file_filters/set_file_filters), чтобы оба этапа видели
+            # одно и то же подмножество файлов. Тег трасс = имя проекта +
+            # язык: несколько кодовых баз/проектов пишут трассы в один $HOME,
+            # префикс не даёт им перепутаться при последующем разборе (см.
+            # cqtrace/CQ_LANG для C/C++, LANG в Cqtrace.java для Java).
             _proj_tag = re.sub(r"[^\w.-]+", "_", meta.get("name", "") or lang)
             trace_tag = _proj_tag if _proj_tag.endswith(f"-{lang}") else f"{_proj_tag}-{lang}"
             cmd = [sys.executable, str(ROOT / "dynamic" / script),
@@ -1108,8 +1109,8 @@ class DynamicTab(QWidget):
                    "--pattern", meta.get("pattern", "")]
             # Геометрия точек вставки — из сырых данных project.db (раздел
             # 'probe'), без отдельного запроса probe_points.ql к CodeQL-БД.
-            # Только для instrument_cpp.py (instrument_c_make.py — свой рантайм).
-            if script == "instrument_cpp.py":
+            # instrument_c_make.py — свой рантайм, эту опцию не принимает.
+            if script in ("instrument_cpp.py", "instrument_java.py"):
                 cmd += ["--project-db", str(self.proj.db_path)]
             flt = self.proj.get_file_filters()
             if flt.get("include_list"):

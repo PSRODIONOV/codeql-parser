@@ -1,0 +1,25 @@
+﻿sid;№ ФО;Запись (br);Файл;Строка;Тип
+1;2;0;branches/BranchDemo.java;6;вход
+2;2;-1;branches/BranchDemo.java;8;выход
+3;3;0;branches/BranchDemo.java;10;вход
+4;3;-1;branches/BranchDemo.java;16;выход
+5;3;1;branches/BranchDemo.java;11;if
+6;4;0;branches/BranchDemo.java;18;вход
+7;4;-1;branches/BranchDemo.java;24;выход
+8;4;1;branches/BranchDemo.java;20;for
+9;5;0;branches/BranchDemo.java;26;вход
+10;5;-1;branches/BranchDemo.java;33;выход
+11;5;1;branches/BranchDemo.java;28;while
+12;6;0;branches/BranchDemo.java;35;вход
+13;6;-1;branches/BranchDemo.java;41;выход
+14;6;1;branches/BranchDemo.java;36;try
+15;7;0;branches/BranchDemo.java;49;вход
+16;7;-1;branches/BranchDemo.java;51;выход
+17;8;0;branches/BranchDemo.java;53;вход
+18;8;-1;branches/BranchDemo.java;55;выход
+19;10;0;branches/Main.java;4;вход
+20;10;-1;branches/Main.java;17;выход
+21;11;0;branches/OtherDemo.java;9;вход
+22;11;-1;branches/OtherDemo.java;11;выход
+23;12;0;branches/OtherDemo.java;13;вход
+24;12;-1;branches/OtherDemo.java;15;выход
