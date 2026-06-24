@@ -76,13 +76,18 @@ CQ_WEAK void __trace_hit(unsigned sid, int fo, int br);
 #define __TRACE(sid, fo, br) __trace_hit((unsigned)(sid), (int)(fo), (int)(br))
 
 /* Вход/выход ФО через cleanup-атрибут GCC/Clang (срабатывает на всех
- * выходах, включая return из середины тела и проброс исключений в C++). */
+ * выходах, включая return из середины тела и проброс исключений в C++).
+ * __inline__ (не просто inline!) — в чистом C bare-"inline" не ключевое
+ * слово до C99, под -std=c89/-ansi/старым default GCC ловится "unknown
+ * type name 'inline'" и каскад ошибок по всем __TRACE_FN() ниже (см.
+ * src/iniparser.c — баг #10). __inline__ — GNU-расширение, доступно в
+ * GCC/Clang независимо от -std= (файл и так требует именно их, см. выше). */
 typedef struct { int fo; unsigned sx; } __trace_g;
-static inline __trace_g __trace_enter(unsigned se, unsigned sx, int fo) {
+static __inline__ __trace_g __trace_enter(unsigned se, unsigned sx, int fo) {
     __trace_hit(se, fo, 0);
     { __trace_g g; g.fo = fo; g.sx = sx; return g; }
 }
-static inline void __trace_leave(__trace_g *g) { __trace_hit(g->sx, g->fo, -1); }
+static __inline__ void __trace_leave(__trace_g *g) { __trace_hit(g->sx, g->fo, -1); }
 #define __TRACE_FN(fo, se, sx) \
     __trace_g __tg_##se __attribute__((cleanup(__trace_leave))) = \
         __trace_enter((unsigned)(se), (unsigned)(sx), (int)(fo))
