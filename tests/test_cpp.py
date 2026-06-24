@@ -347,3 +347,22 @@ class TestInstrumentorRegressionBugs:
             "catch оторван от try-блока (закрывающая '}' обёртки вставлена раньше catch)")
         assert re.search(r"catch \(const std::exception&\) \{\s*\n\s*__TRACE\(\d+, \d+, \d+\);", body), (
             "датчик catch не сразу после его {")
+
+    def test_constexpr_function_not_instrumented(self, cpp_branches_instrumented_src):
+        """Баг #9: constexpr-функция не должна получать датчик —
+        __TRACE_FN() вызывает обычную (не constexpr) __trace_enter(), что
+        ломает constexpr-вычислимость функции и даёт каскад ошибок в любом
+        зависимом constexpr-контексте/шаблоне (прототип: реальная сборка
+        osm2pgsql/contrib/fmt — fmt::v8::monostate::monostate(),
+        is_constant_evaluated() — каскад из 100+ ошибок компиляции по всей
+        библиотеке). ФО легитимен в статике, но БЕЗ датчика (как
+        самодостаточный макрос/CHECK-идиома, см. probe_points.ql::
+        not f.isConstexpr()). static_assert ниже — РЕАЛЬНАЯ проверка на
+        этапе компиляции: функция должна остаться буквально неизменной."""
+        src = (cpp_branches_instrumented_src / "advanced_demo.cpp").read_text(encoding="utf-8")
+        assert re.search(
+            r"constexpr int constexpr_square\(int x\) \{\s*\n\s*return x \* x;\s*\n\}", src), (
+            "constexpr_square изменена (датчик вставлен в constexpr-функцию)")
+        assert re.search(
+            r'static_assert\(constexpr_square\(3\) == 9, "[^"]*"\);', src), (
+            "static_assert у constexpr_square изменён/удалён")

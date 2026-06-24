@@ -100,3 +100,19 @@ int case_no_space_kind(int x) {
         default:return -1;         // ветвь #2 (default) — без пробела перед телом
     }
 }
+
+// Регресс бага #9: constexpr-функция. __TRACE_FN() вызывает обычную (не
+// constexpr) __trace_enter() — если в функцию вставить датчик, она теряет
+// constexpr-вычислимость, и любой static_assert/constexpr-контекст,
+// зависящий от неё, ломается с каскадом вторичных ошибок по всем
+// зависимым шаблонам (прототип: fmt::v8::monostate::monostate(),
+// fmt::v8::detail::is_constant_evaluated() в osm2pgsql/contrib/fmt —
+// там это снесло сборку всего проекта, см. queries/cpp/probe_points.ql::
+// not f.isConstexpr()). ФО легитимен в статике, но БЕЗ датчика — как
+// самодостаточный макрос/CHECK-идиома. static_assert ниже требует
+// РЕАЛЬНОГО вычисления на этапе компиляции: если регресс вернётся,
+// инструментированная сборка этой фикстуры перестанет компилироваться.
+constexpr int constexpr_square(int x) {
+    return x * x;
+}
+static_assert(constexpr_square(3) == 9, "constexpr_square должен вычисляться на этапе компиляции");

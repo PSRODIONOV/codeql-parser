@@ -134,6 +134,7 @@
 | `clamp_val<int>`  | if, if                 | 2 | шаблон ✅ (по инстанцированию) |
 | `brace_literal_guard` | if#1               | 1 | литерал `'{'` в условии на одной строке с настоящей `{` тела (см. `adlparse.cpp::get_oplist`) |
 | `case_no_space_kind`  | case#1, default#2  | 2 | `case`/`default` БЕЗ пробела перед телом (см. `c1_LIR.hpp::as_BasicType`) |
+| `constexpr_square`    | —                  | 0 | ⚠️ `constexpr`-функция — легитимна в статике, но БЕЗ датчика (см. `fmt::v8::monostate`, osm2pgsql/contrib/fmt) |
 
 Проверено по факту в `Перечень_ветвей.csv`: function-try-block и шаблон
 инструментируются; ветвь внутри лямбды — нет.
@@ -161,12 +162,13 @@ range-based for, `?:`, `&&`/`\|\|`, `if` из макроса, case-метки и
 ### Итог (проверено на БД)
 
 Статический `Перечень_ветвей.csv` для этого проекта содержит **104 ветви** в
-68 ФО; инструментатор размещает **246 датчиков** (вход/выход + ветви) — 3
-ФО (`macro_full_body`, `add_via_macro`, `add_via_macro2`) легитимны в
-статике, но без датчика (самодостаточный макрос, нет надёжного места для
-вставки), плюс 1 ветвь (`check_macro_guard`, if с телом на HotSpot-идиоме
-CHECK) — ФО инструментирован (вход/выход есть), но именно эта ветвь без
-датчика (см. `core/codeql_analyzer.py`/`dynamic/instrument_c_make.py`),
+69 ФО; инструментатор размещает **246 датчиков** (вход/выход + ветви) — 4
+ФО (`macro_full_body`, `add_via_macro`, `add_via_macro2`, `constexpr_square`)
+легитимны в статике, но без датчика (самодостаточный макрос/constexpr —
+нет надёжного места для вставки или вставка ломает компиляцию), плюс
+1 ветвь (`check_macro_guard`, if с телом на HotSpot-идиоме CHECK) — ФО
+инструментирован (вход/выход есть), но именно эта ветвь без датчика
+(см. `core/codeql_analyzer.py`/`dynamic/instrument_c_make.py`),
 **0 пропусков** среди прочих, синтаксис инструментированного кода — OK.
 Сюда входят `if`/`else`/`for`/`while`/`do`/`try`/`catch`/`case`/`default`.
 Ветви внутри лямбды (`count_positive`) НЕ отслеживаются — `operator()`
@@ -206,7 +208,7 @@ make
 
 ## Регрессия инструментатора (найденные и исправленные баги)
 
-Фикстуры ниже воспроизводят 8 конкретных багов `instrument_c_make.py`/
+Фикстуры ниже воспроизводят 9 конкретных багов `instrument_c_make.py`/
 `instrument_cpp.py`/`core/codeql_analyzer.py`/`queries/cpp/*.ql`, найденных на
 реальных проектах (HotSpot/gosjava) и закреплённых здесь как регресс
 (`tests/test_cpp.py`, классы `TestInstrumentorRegressionBugs` — побайтовая
@@ -223,3 +225,4 @@ make
 | 6 | `sensor_map`/`Карта_датчиков.csv` заполнялся ДО того, как стало известно, удастся ли вставить датчик (баг 2/X-macro) — карта лгала о датчиках, которых в коде нет, и портила Покрытие_ФО (ложное «не покрыт» вместо «не инстр.») | те же ФО, что в баге 2 | — (найдено при добавлении регресса для бага 2) |
 | 7 | Макрос — последний аргумент вызова, САМ закрывающий список аргументов и порождающий `if` внутри своего раскрытия (`f(args, CHECK)` -> `f(args, THREAD); if (...) return; ...)`). CodeQL репортует конец одиночного оператора-тела `if` (hasBlock=0) сразу после "CHECK" — ВНУТРИ списка аргументов вызова, а не после настоящего `');'`. Обёртка `{ датчик; ВЫЗОВ }` по такой координате вставляла `}` внутрь аргументов | `check_macro_guard` (`macro_demo.cpp`) | `CHECK`/`CHECK_`/`RETURN`/`TRAPS` (`classFileParser.cpp::classfile_parse_error`, HotSpot) |
 | 8 | `while(...) try {...} catch(...) {...}` без своих `{}` вокруг while (тело while — сам `TryStmt`). CodeQL даёт `TryStmt.getLocation()` только до конца try-блока, БЕЗ catch-обработчика, поэтому закрывающая `}` обёртки одиночного оператора (hasBlock=0) попадала ПРЯМО ПЕРЕД `catch` — он оставался "осиротевшим" вне фигурных скобок while, сборка ломалась (`expected 'catch' before '}' token`). Фикс — `queries/cpp/probe_points.ql::properStmtEnd()` берёт конец ПОСЛЕДНЕГО catch-блока вместо `TryStmt.getLocation()` | `while_try_no_brace` (`exception_demo.cpp`) | `rikdataset.cpp::RIKRasterBand::IReadBlock` (GDAL/RIK) |
+| 9 | `constexpr`-функция получала датчик: `__TRACE_FN()`/`__TRACE()` вызывают обычные (не `constexpr`) `__trace_enter()`/`__trace_hit()`, что ломает constexpr-вычислимость функции — любой зависимый `static_assert`/constexpr-контекст/шаблон ломается каскадом вторичных ошибок компиляции по всей библиотеке. Фикс — `queries/cpp/probe_points.ql` добавляет `not f.isConstexpr()` (и симметрично для enclosing-функции во всех branch-клаузах) — ФО легитимен в статике, но БЕЗ датчика, как самодостаточный макрос | `constexpr_square` (`advanced_demo.cpp`) | `fmt::v8::monostate::monostate()`, `fmt::v8::detail::is_constant_evaluated()` (header-only `fmt`, `osm2pgsql/contrib/fmt`) — снесло сборку всего проекта (100+ ошибок) |

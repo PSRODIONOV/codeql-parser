@@ -41,4 +41,9 @@ T clamp_val(T v, T lo, T hi) {
     return v;
 }
 
+// --- регрессия инструментатора: constexpr-функция — датчик вставлять
+// нельзя, __trace_enter()/__trace_hit() не constexpr (см. probe_points.ql,
+// прототип fmt::v8::monostate::monostate() в osm2pgsql/contrib/fmt) ---
+constexpr int constexpr_square(int x);
+
 #endif // ADVANCED_DEMO_H

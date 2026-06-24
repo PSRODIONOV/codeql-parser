@@ -186,7 +186,16 @@ predicate probe(
     isProjectFile(bodyFile) and
     not f.getName().indexOf("operator") = 0 and
     not f.isInMacroExpansion() and
-    not f.isCompilerGenerated()
+    not f.isCompilerGenerated() and
+    // constexpr-функция: __TRACE_FN() вызывает обычную (не constexpr)
+    // __trace_enter() — если функция реально вычисляется в constant
+    // expression (напр. fmt::v8::monostate::monostate(), is_constant_evaluated()
+    // в header-only fmt из osm2pgsql/contrib), такой вызов даёт
+    // "call to non-constexpr function" и каскад ошибок по всем зависимым
+    // шаблонам. ФО остаётся легитимным в Перечень_ФО, просто без датчика
+    // (как самодостаточные макросы/CHECK-идиома) — см. branch-клаузы ниже,
+    // там та же причина и тот же fix для __TRACE() внутри ветвей.
+    not f.isConstexpr()
   |
     kind    = "entry" and
     func    = f.getQualifiedName() and
@@ -212,6 +221,9 @@ predicate probe(
     not s.getEnclosingFunction().getName().indexOf("operator") = 0 and
     not s.getEnclosingFunction().isCompilerGenerated() and
     not s.getEnclosingFunction().isInMacroExpansion() and
+    // см. not f.isConstexpr() в entry-клаузе выше: __TRACE() для ветви —
+    // тоже обычная (не constexpr) функция, ломает constexpr enclosing-ФО.
+    not s.getEnclosingFunction().isConstexpr() and
     body = branchBody(s)
   |
     kind    = "branch" and
@@ -240,6 +252,7 @@ predicate probe(
     not parent.getEnclosingFunction().getName().indexOf("operator") = 0 and
     not parent.getEnclosingFunction().isCompilerGenerated() and
     not parent.getEnclosingFunction().isInMacroExpansion() and
+    not parent.getEnclosingFunction().isConstexpr() and
     body = elseBody(parent)
   |
     kind    = "branch" and
@@ -272,6 +285,7 @@ predicate probe(
     not sw.getEnclosingFunction().getName().indexOf("operator") = 0 and
     not sw.getEnclosingFunction().isCompilerGenerated() and
     not sw.getEnclosingFunction().isInMacroExpansion() and
+    not sw.getEnclosingFunction().isConstexpr() and
     // Сама МЕТКА может быть синтезирована макросом, даже если switch и
     // функция — нет (см. REP8/REP16 в assembler_x86.cpp: один макровызов
     // `case REP8(0xB8):` разворачивается в 8 НЕЗАВИСИМЫХ case-меток
@@ -309,7 +323,8 @@ predicate probe(
     isProjectFile(h.getFile()) and
     not h.getEnclosingFunction().getName().indexOf("operator") = 0 and
     not h.getEnclosingFunction().isCompilerGenerated() and
-    not h.getEnclosingFunction().isInMacroExpansion()
+    not h.getEnclosingFunction().isInMacroExpansion() and
+    not h.getEnclosingFunction().isConstexpr()
   |
     kind    = "branch" and
     func    = h.getEnclosingFunction().getQualifiedName() and
