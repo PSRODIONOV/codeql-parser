@@ -118,10 +118,11 @@ def run_probe_query(codeql, db, query, path_pattern="%"):
     with open(csvp, encoding="utf-8") as fh:
         r = csv.reader(fh); next(r, None)
         for row in r:
-            if len(row) < 9: continue
+            # kind, func, file, ref_line, ins_line, ins_col, has_block, btype, end_line, end_col
+            if len(row) < 10: continue
             pts.append({"kind": row[0], "func": row[1], "file": row[2],
                         "ref_line": int(row[3]), "open_line": int(row[4]), "open_col": int(row[5]),
-                        "close_line": int(row[6]), "close_col": int(row[7]), "btype": row[8]})
+                        "close_line": int(row[8]), "close_col": int(row[9]), "btype": row[7]})
     return pts
 
 
@@ -129,8 +130,9 @@ def read_probe_points_from_db(project_db_path: str):
     """Читает геометрию точек вставки из СЫРЫХ ДАННЫХ project.db (раздел
     'probe', собранный на этапе статики через probe_points.ql) — без
     отдельного запроса к CodeQL-БД (см. instrument_cpp.py). Колонки
-    queries/java/probe_points.ql называются camelCase (refLine/openLine/
-    openCol/closeLine/closeCol) — отличие от C++-варианта, маппинг локальный."""
+    queries/java/probe_points.ql названы ТАК ЖЕ, как у C++-варианта
+    (ref_line/ins_line/ins_col/end_line/end_col — см. RAW_SCHEMA["q_probe"]
+    в core/project_db.py), чтобы одна таблица БД годилась для обоих языков."""
     import sys as _sys
     _sys.path.insert(0, str(HERE.parent))
     from core.project_db import ProjectDB
@@ -150,9 +152,9 @@ def read_probe_points_from_db(project_db_path: str):
     for r in rows:
         pts.append({
             "kind": r.get("kind", ""), "func": r.get("func", ""), "file": r.get("file", ""),
-            "ref_line": _i(r.get("refLine")), "open_line": _i(r.get("openLine")),
-            "open_col": _i(r.get("openCol")), "close_line": _i(r.get("closeLine")),
-            "close_col": _i(r.get("closeCol")), "btype": r.get("btype", ""),
+            "ref_line": _i(r.get("ref_line")), "open_line": _i(r.get("ins_line")),
+            "open_col": _i(r.get("ins_col")), "close_line": _i(r.get("end_line")),
+            "close_col": _i(r.get("end_col")), "btype": r.get("btype", ""),
         })
     return pts
 
@@ -241,22 +243,34 @@ def main():
 
     # 3. Точки вставки — из сырых данных project.db, если передан, иначе
     # свежим запросом probe_points.ql (fallback для standalone-режима).
+    # Раздел 'probe' может быть ПУСТ в project.db, собранном до того, как
+    # project_runner.py начал собирать его для языка "java" (миграция БД не
+    # переисполняет старые запросы сама) — раньше это давало 0 точек молча.
+    # Полная пересборка статики ради одного отсутствующего раздела — дорого
+    # (перезапуск ВСЕХ запросов на БД), а нужен только probe_points.ql, поэтому
+    # при пустом разделе откатываемся на лёгкий прямой запрос вместо отказа.
+    pts = []
+    source = ""
     if args.project_db:
         pts = read_probe_points_from_db(args.project_db)
-        print(f"[3] Геометрия точек вставки: из сырых данных project.db "
-              f"(раздел 'probe', без отдельного запроса)")
-    else:
+        if pts:
+            source = "из сырых данных project.db (раздел 'probe')"
+        else:
+            print("    Внимание: раздел 'probe' в project.db пуст (БД собрана "
+                  "до добавления этого языка в project_runner.py, или статика "
+                  "вообще не пересобиралась) — делаю прямой запрос probe_points.ql "
+                  "вместо отказа (дешевле полной пересборки статики).")
+    if not pts:
         pts = run_probe_query(args.codeql, db_path,
                               HERE.parent / "queries" / args.lang / "probe_points.ql",
                               path_pattern=args.pattern or "%")
-        print(f"[3] Геометрия точек вставки: запросом probe_points.ql "
-              f"(project.db не передан — standalone-режим)")
-    print(f"[3] Точек вставки: {len(pts)}")
+        source = "запросом probe_points.ql" + ("" if args.project_db else " (standalone-режим)")
+    print(f"[3] Точек вставки: {len(pts)} ({source})")
 
     all_java = list(out.rglob("*.java"))
     pkg = args.cqtrace_package or detect_package(all_java)
     ref = (pkg + ".Cqtrace") if pkg else "Cqtrace"
-    print(f"[3] Пакет Cqtrace: {pkg or '(default)'} → ссылка {ref}.hit(...)")
+    print(f"    Пакет Cqtrace: {pkg or '(default)'} → ссылка {ref}.hit(...)")
 
     # Индекс по basename → [(relpath, Path)] для сопоставления по относительному пути.
     from collections import defaultdict
@@ -353,7 +367,43 @@ def main():
             except Exception:
                 pass
     (cq_dir / "Cqtrace.java").write_text(cq, encoding="utf-8")
-    print(f"[5] Рантайм: {(cq_dir / 'Cqtrace.java').relative_to(out)}")
+    print(f"[5] Рантайм (исходник): {(cq_dir / 'Cqtrace.java').relative_to(out)}")
+
+    # cqtrace-runtime.jar — для legacy-сборок с НЕСКОЛЬКИМИ независимыми
+    # корнями исходников на один и тот же пакет (типично для многомодульных
+    # Ant/autotools-сборок вида OpenJDK: jdk/corba/langtools и т.п., каждый
+    # со своим javac-вызовом и своим sourcepath). Единственная физическая
+    # копия .java видна ТОЛЬКО тому javac-вызову, чей sourcepath включает её
+    # каталог — поэтому для других корней та же ссылка <pkg>.Cqtrace.hit(...)
+    # даёт "cannot find symbol". .jar в CLASSPATH резолвится независимо от
+    # sourcepath/каталога — единая копия видна всем javac-вызовам сборки.
+    # Класть .java-копию ВО ВСЕ каталоги пакета не годится: при рекурсивной
+    # сборке (wildcard/find по дереву) несколько копий в одном javac-вызове
+    # дают "duplicate class" (тот же класс багов, что и sun.misc.Version в
+    # gen_profile_2/3/gensrc), а если они всё же компилируются РАЗНО по
+    # разным выходным деревьям — состояние датчиков (счётчики, маршруты
+    # R:/C:) расщепляется по экземплярам класса вместо одного общего.
+    cqtrace_jar = None
+    jar_build = out / ".cqtrace_jar_build"
+    jar_build.mkdir(exist_ok=True)
+    jar_src = jar_build / "src" / (Path(*pkg.split(".")) if pkg else Path("."))
+    jar_src.mkdir(parents=True, exist_ok=True)
+    (jar_src / "Cqtrace.java").write_text(cq, encoding="utf-8")
+    jar_classes = jar_build / "classes"; jar_classes.mkdir(exist_ok=True)
+    rj = subprocess.run(["javac", "-d", str(jar_classes), str(jar_src / "Cqtrace.java")],
+                        capture_output=True, text=True)
+    if rj.returncode == 0:
+        cqtrace_jar = out / "cqtrace-runtime.jar"
+        subprocess.run(["jar", "-cf", str(cqtrace_jar), "-C", str(jar_classes), "."], check=True)
+        print(f"[5] Рантайм (jar): {cqtrace_jar.relative_to(out)} — добавьте в CLASSPATH "
+              f"сборки (напр. export CLASSPATH=\"$CLASSPATH:{cqtrace_jar}\"), если "
+              f"пакет {pkg or '(default)'} компилируется НЕСКОЛЬКИМИ независимыми "
+              f"javac-вызовами с разным sourcepath (модульная/legacy-сборка).")
+    else:
+        print(f"[5] !!! Не удалось собрать cqtrace-runtime.jar: "
+              f"{rj.stderr.strip().splitlines()[-1] if rj.stderr.strip() else rj.returncode} "
+              f"— остаётся только исходник, см. выше.")
+    shutil.rmtree(jar_build, ignore_errors=True)
 
     with open(out / "Карта_датчиков.csv", "w", encoding="utf-8-sig", newline="") as fh:
         w = csv.writer(fh, delimiter=";")
@@ -365,11 +415,34 @@ def main():
     if args.no_syntax_check:
         print("[8] Проверка синтаксиса пропущена (--no-syntax-check; проверит сборка).")
     else:
-        print("[8] Проверка синтаксиса (javac)...")
+        # Cqtrace резолвим через cqtrace_jar (-classpath), а не добавлением
+        # исходника cq_dir/Cqtrace.java в файлы компиляции: если бы класс
+        # пришлось РЕЗОЛВИТЬ через sourcepath (а не передать явным файлом),
+        # touched-подмножество (только датчики, без полного дерева) не дало
+        # бы javac найти cq_dir по относительному пакетному пути. С jar
+        # резолюция не зависит от того, какие каталоги выжили после прунинга.
+        # Если jar не собрался (см. выше) — откатываемся на старое поведение:
+        # передаём исходник Cqtrace.java явным файлом компиляции.
+        _check_set = touched if cqtrace_jar else (touched | {cq_dir / "Cqtrace.java"})
+        java_files = [str(p.relative_to(out)) for p in sorted(_check_set)]
+        print(f"[8] Проверка синтаксиса (javac, файлов: {len(java_files)})...")
         chk = out / ".syntax_check"; chk.mkdir(exist_ok=True)
-        java_files = [str(p.relative_to(out)) for p in sorted(touched | {cq_dir / "Cqtrace.java"})]
-        r = subprocess.run(["javac", "-d", str(chk), *java_files], cwd=out,
-                           capture_output=True, text=True)
+        # @argfile — иначе при тысячах файлов командная строка превышает лимит
+        # Windows CreateProcess (WinError 206 "имя файла или его расширение
+        # имеет слишком большую длину"), даже когда каждый путь сам по себе
+        # короткий: ограничение — на суммарную длину, а не на отдельный аргумент.
+        argfile = out / ".javac_args.txt"
+        with open(argfile, "w", encoding="utf-8") as fh:
+            for jf in java_files:
+                fh.write(f'"{jf}"\n' if " " in jf else jf + "\n")
+        javac_cmd = ["javac", "-d", str(chk)]
+        if cqtrace_jar:
+            javac_cmd += ["-classpath", str(cqtrace_jar)]
+        javac_cmd.append(f"@{argfile.name}")
+        try:
+            r = subprocess.run(javac_cmd, cwd=out, capture_output=True, text=True)
+        finally:
+            argfile.unlink(missing_ok=True)
         shutil.rmtree(chk, ignore_errors=True)
         errors = [(ln.split(":")[0], ln) for ln in r.stderr.splitlines() if ": error:" in ln]
         if errors:

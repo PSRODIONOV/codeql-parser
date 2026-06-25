@@ -78,6 +78,17 @@ try {
     & $gitBash $genListPosix $refPosix $tmpListPosix
     if ($LASTEXITCODE -ne 0) { throw "Генерация списка завершилась с кодом $LASTEXITCODE" }
 
+    # Снимаем Windows-атрибут "только для чтения" ПЕРЕД WSL chmod: на DrvFs
+    # он блокирует смену Unix-прав даже при включённой metadata (EPERM на
+    # отдельных файлах — типично уцелевшие .bak/распакованные артефакты),
+    # из-за чего chmod 644/755 батчем ловил "Operation not permitted" на
+    # части дерева. Атрибут read-only сам по себе для tar/genisoimage не
+    # нужен — только Unix-биты, которые ставит шаг [2/2].
+    Write-Host "[1.5/2] Снятие атрибута 'только для чтения' в целевом дереве ..."
+    Get-ChildItem -LiteralPath $Target -Recurse -Force -File |
+        Where-Object { $_.IsReadOnly } |
+        ForEach-Object { $_.IsReadOnly = $false }
+
     Write-Host "[2/2] Применение прав к целевому дереву (WSL) ..."
     $targetWsl   = Convert-ToWslPath $Target
     $tmpListWsl  = Convert-ToWslPath $tmpList

@@ -1123,6 +1123,19 @@ class DynamicTab(QWidget):
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text("\n".join(flt["exclude_list"]), encoding="utf-8")
                 cmd += ["--exclude-list", str(p)]
+            # У C/C++ "своя сборка" переключает СКРИПТ (instrument_c_make.py
+            # вообще не делает standalone-проверку синтаксиса — её роль
+            # выполняет make). instrument_java.py — один скрипт на оба
+            # случая, поэтому здесь та же галочка просто гасит javac-проверку:
+            # плоский javac по подмножеству файлов после прунинга НЕ может
+            # резолвить символы из НЕинструментированных классов того же
+            # проекта (см. gosjava: gen_profile_2/3 — намеренные дубликаты
+            # профилей JDK-сборки, JDWP.java — модуль не входит в текущий
+            # --pattern) — это false positive синтаксис-чекера, а не
+            # реальная ошибка вставки датчиков; настоящую сборку выполнит
+            # сборочная система проекта (make/Maven/JDK build).
+            if lang == "java" and build:
+                cmd.append("--no-syntax-check")
         else:
             cmd = [sys.executable, str(ROOT / "dynamic" / script),
                    "--project", str(orig), "--db", meta["codeql_db_path"],

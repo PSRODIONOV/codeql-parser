@@ -334,10 +334,14 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
     if needs_arg_flow:  _needed.append("arg_flow")
     if needs_file_flow: _needed.append("file_flow")
     if needs_flow:      _needed.append("flow")
-    # Геометрия точек вставки датчиков для инструментации (C/C++): собираем в
-    # составе сырых данных и сохраняем в project.db, чтобы инструментатор брал её
-    # оттуда, а не делал отдельный запрос probe_points.ql (см. instrument_cpp.py).
-    if language in ("cpp", "c"): _needed.append("probe")
+    # Геометрия точек вставки датчиков для инструментации: собираем в составе
+    # сырых данных и сохраняем в project.db, чтобы инструментатор брал её оттуда,
+    # а не делал отдельный запрос probe_points.ql (см. instrument_cpp.py,
+    # instrument_java.py). Раньше список был только ("cpp", "c") — Java имеет
+    # queries/java/probe_points.ql ровно того же назначения, но "probe" для него
+    # никогда не собирался: --project-db в instrument_java.py читал ВСЕГДА
+    # пустую таблицу q_probe, молча давая 0 точек вставки без единой ошибки.
+    if language in ("cpp", "c", "java"): _needed.append("probe")
 
     _LABELS: Dict[str, tuple] = {
         "functional": ("ФО",      "Сбор функциональных объектов"),
