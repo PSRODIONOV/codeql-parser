@@ -27,6 +27,25 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RUNTIME = HERE / "runtime"
 
+# Пакеты раннего bootstrap JVM: на старте (System.initializeSystemClass и
+# раньше) методы этих классов исполняются ДО того, как VM способна
+# диспетчеризовать вызов Cqtrace.hit(...) — попытка такого вызова уходит в
+# нулевой нативный code-entry и валит JVM SIGSEGV (нативный краш на уровне
+# ниже байткода: его не лечит ни re-entrancy guard, ни catch(Throwable) в
+# самом hit() — тело hit() просто не успевает начать исполняться). Только
+# ПРЯМЫЕ члены пакета (java.lang.* в смысле import-звёздочки, БЕЗ
+# подпакетов) — java.lang.reflect/ref/annotation/management и т.п. не входят
+# в критический bootstrap-путь и инструментируются как обычно. java.lang.invoke
+# исключён отдельно (ASM-генераторы байткода/nasgen дёргают его так же рано).
+_BOOTSTRAP_RX = re.compile(
+    r"(^|/)java/lang/(invoke/)?[^/]+\.java$"
+    r"|(^|/)java/(util|io|nio)/[^/]+\.java$"
+)
+
+
+def _is_bootstrap_path(zip_path: str) -> bool:
+    return bool(_BOOTSTRAP_RX.search(zip_path.replace("\\", "/")))
+
 
 def read_fo_numbers(reports_dir: Path):
     """Перечень_ФО → {qualified_name: [(fo_num, file, line), ...]} — СПИСОК,
@@ -159,6 +178,51 @@ def read_probe_points_from_db(project_db_path: str):
     return pts
 
 
+def dedupe_probe_points(pts, log=print):
+    """Убирает точки вставки с ПОЛНОСТЬЮ совпадающей геометрией (kind/file/
+    open_line/open_col/close_line/close_col). CodeQL может вернуть НЕСКОЛЬКО
+    разных сущностей Callable/Stmt для ОДНОЙ физической точки исходника —
+    напр. generic-инстанцирование/raw-типы дают отдельные Method-сущности с
+    одинаковым телом и локацией, но разным func (qname зависит от того, через
+    какой generic-контекст CodeQL видит declaring type). Без дедупликации
+    КАЖДАЯ лишняя строка добавляет ЕЩЁ ОДНУ вставку в ТУ ЖЕ позицию — реальный
+    кейс на большом проекте: один try получал два finally (невалидный
+    синтаксис), сконцентрировано в java.io.* (BufferedReader,
+    BufferedInputStream, Bits — raw/generic-heavy классы JDK)."""
+    seen = set()
+    out = []
+    dup = 0
+    for pt in pts:
+        key = (pt["kind"], pt["file"], pt["open_line"], pt["open_col"],
+               pt["close_line"], pt["close_col"])
+        if key in seen:
+            dup += 1
+            continue
+        seen.add(key)
+        out.append(pt)
+    if dup and log:
+        log(f"[3] Дубликатов геометрии точек вставки отброшено: {dup} "
+            f"(одна и та же позиция вставки пришла от нескольких CodeQL-сущностей)")
+    return out
+
+
+def _insertion_is_valid(ln: str, eff: int, prio: int) -> bool:
+    """Геометрия из CodeQL иногда не попадает на границу токена (реальный
+    кейс: com.sun.corba...ObjectStreamClass.getFields() — вставка пришлась
+    ВНУТРЬ имени метода/переменной, разрезав идентификатор пополам:
+    "getField" + датчик + "s()", а закрывающая — внутрь "length"). Открывающая
+    вставка (prio=0: вход ФО ИЛИ ветвь) ВСЕГДА должна идти СРАЗУ после '{',
+    закрывающая (prio=1: выход ФО) — СТРОГО на месте '}' тела (см. add_ins/
+    ins_col в main: открытие — ins_col как 0-based индекс ПОСЛЕ '{', закрытие
+    — close_col-1 как 0-based индекс САМОГО '}'). Если это не так — позиция
+    недостоверна (рассинхрон строки/колонки в данных CodeQL по неизвестной
+    пока причине), и лучше честно пропустить датчик (см. dropped_sids), чем
+    молча испортить синтаксис файла."""
+    if prio == 0:
+        return eff > 0 and ln[eff - 1] == "{"
+    return eff < len(ln) and ln[eff] == "}"
+
+
 def detect_package(files):
     rx = re.compile(r"^\s*package\s+([\w.]+)\s*;")
     from collections import Counter
@@ -191,6 +255,15 @@ def main():
     ap.add_argument("--no-syntax-check", action="store_true",
                     help="пропустить проверку javac (для Maven/Gradle — её роль выполнит сборка; "
                          "javac всех файлов сразу всё равно требует classpath/зависимости).")
+    ap.add_argument("--no-exclude-bootstrap", action="store_true",
+                    help="НЕ исключать java.lang.*/java.util.*/java.io.*/java.nio.*/"
+                         "java.lang.invoke.* (прямые члены, без подпакетов) из охвата. "
+                         "По умолчанию они исключаются: датчик в этих классах вызывается "
+                         "на раннем bootstrap JVM, до готовности VM диспетчеризовать вызов "
+                         "метода — нативный SIGSEGV, который НЕ лечится ни re-entrancy guard, "
+                         "ни catch(Throwable) внутри Cqtrace.hit() (он не успевает начать "
+                         "исполняться). Снимайте флаг только если уверены, что эти пакеты "
+                         "не входят в реальный охват компиляции вашего проекта.")
     ap.add_argument("--project-db", default="",
                     help="Путь к project.db. Если задан — геометрия точек вставки "
                          "берётся из сырых данных (раздел 'probe'), БЕЗ отдельного "
@@ -227,9 +300,20 @@ def main():
     # реально анализировал CodeQL), как у C/C++ (см. core/file_lists.py).
     print(f"[1] Извлекаю дерево исходников из src.zip БД -> {out} ...")
     from instrument_c_make import _pattern_filter_factory
+    _base_filter = _pattern_filter_factory(args.pattern)
+    if args.no_exclude_bootstrap:
+        _extract_filter = _base_filter
+    else:
+        def _extract_filter(zip_path, _base=_base_filter):
+            if _is_bootstrap_path(zip_path):
+                return False
+            return _base(zip_path) if _base else True
+        print("    Исключаю из охвата java.lang/java.util/java.io/java.nio/"
+              "java.lang.invoke (прямые члены) — раннний bootstrap JVM, "
+              "см. --no-exclude-bootstrap.")
     extract_res = extract_project_sources(
         db_path, out,
-        pattern_filter=_pattern_filter_factory(args.pattern),
+        pattern_filter=_extract_filter,
         include_patterns=include_list, exclude_patterns=exclude_list,
         include_list=include_list, exclude_list=exclude_list, log=print)
     if extract_res["generated_skipped"]:
@@ -266,6 +350,7 @@ def main():
                               path_pattern=args.pattern or "%")
         source = "запросом probe_points.ql" + ("" if args.project_db else " (standalone-режим)")
     print(f"[3] Точек вставки: {len(pts)} ({source})")
+    pts = dedupe_probe_points(pts)
 
     all_java = list(out.rglob("*.java"))
     pkg = args.cqtrace_package or detect_package(all_java)
@@ -364,6 +449,8 @@ def main():
             elif ln.endswith("\n"): ln, nl = ln[:-1], "\n"
             if eff < 0 or eff > len(ln):
                 dropped_sids.add(sid_); continue
+            if not _insertion_is_valid(ln, eff, prio):
+                dropped_sids.add(sid_); continue
             lines[idx] = ln[:eff] + text + ln[eff:] + nl
         fp.write_text("".join(lines), encoding="utf-8")
 
@@ -389,7 +476,8 @@ def main():
 
     if dropped_sids:
         sensor_map = [sm for sm in sensor_map if sm[0] not in dropped_sids]
-        print(f"[4] Датчиков не вставлено (вне границ файла): {len(dropped_sids)}")
+        print(f"[4.1] Датчиков не вставлено (вне границ файла или вне границы "
+              f"токена — недостоверная геометрия CodeQL): {len(dropped_sids)}")
 
     # Рантайм Cqtrace.java — в КАТАЛОГ пакета (для Maven: src/main/org/h2/Cqtrace.java).
     tmpl = (RUNTIME / "Cqtrace.java.tmpl").read_text(encoding="utf-8")
@@ -411,7 +499,7 @@ def main():
             except Exception:
                 pass
     (cq_dir / "Cqtrace.java").write_text(cq, encoding="utf-8")
-    print(f"[5] Рантайм (исходник): {(cq_dir / 'Cqtrace.java').relative_to(out)}")
+    print(f"[5.1] Рантайм (исходник): {(cq_dir / 'Cqtrace.java').relative_to(out)}")
 
     # cqtrace-runtime.jar — для legacy-сборок с НЕСКОЛЬКИМИ независимыми
     # корнями исходников на один и тот же пакет (типично для многомодульных
@@ -442,13 +530,26 @@ def main():
                         str(jar_src / "Cqtrace.java")], capture_output=True, text=True)
     if rj.returncode == 0:
         cqtrace_jar = out / "cqtrace-runtime.jar"
+        # Повторная инструментация в ТОТ ЖЕ --out (без очистки workspace
+        # между прогонами — обычный случай при итеративной доводке большого
+        # проекта): если предыдущий прогон упал РОВНО на этом шаге (см.
+        # check=True ниже — исключение прерывает скрипт ДО финальной чистки
+        # .cqtrace_jar_build), на диске может остаться объект с этим именем,
+        # несовместимый с открытием на запись через FileOutputStream — `jar`
+        # падает "Cannot create a file when that file already exists" (если
+        # это каталог). Без явной чистки скрипт ломался на ЛЮБОМ повторном
+        # запуске после первого сбоя именно тут.
+        if cqtrace_jar.is_dir():
+            shutil.rmtree(cqtrace_jar, ignore_errors=True)
+        elif cqtrace_jar.exists():
+            cqtrace_jar.unlink()
         subprocess.run(["jar", "-cf", str(cqtrace_jar), "-C", str(jar_classes), "."], check=True)
-        print(f"[5] Рантайм (jar): {cqtrace_jar.relative_to(out)} — добавьте в CLASSPATH "
+        print(f"[5.2] Рантайм (jar): {cqtrace_jar.relative_to(out)} — добавьте в CLASSPATH "
               f"сборки (напр. export CLASSPATH=\"$CLASSPATH:{cqtrace_jar}\"), если "
               f"пакет {pkg or '(default)'} компилируется НЕСКОЛЬКИМИ независимыми "
               f"javac-вызовами с разным sourcepath (модульная/legacy-сборка).")
     else:
-        print(f"[5] !!! Не удалось собрать cqtrace-runtime.jar: "
+        print(f"[5.2] !!! Не удалось собрать cqtrace-runtime.jar: "
               f"{rj.stderr.strip().splitlines()[-1] if rj.stderr.strip() else rj.returncode} "
               f"— остаётся только исходник, см. выше.")
     shutil.rmtree(jar_build, ignore_errors=True)
@@ -461,7 +562,7 @@ def main():
     # Проверка синтаксиса — javac всех плоских .java (только для мелких проектов).
     # Для проектов со своей сборкой (Maven/Gradle) её роль выполняет последующая сборка.
     if args.no_syntax_check:
-        print("[8] Проверка синтаксиса пропущена (--no-syntax-check; проверит сборка).")
+        print("[6] Проверка синтаксиса пропущена (--no-syntax-check; проверит сборка).")
     else:
         # Cqtrace резолвим через cqtrace_jar (-classpath), а не добавлением
         # исходника cq_dir/Cqtrace.java в файлы компиляции: если бы класс
@@ -473,7 +574,7 @@ def main():
         # передаём исходник Cqtrace.java явным файлом компиляции.
         _check_set = touched if cqtrace_jar else (touched | {cq_dir / "Cqtrace.java"})
         java_files = [str(p.relative_to(out)) for p in sorted(_check_set)]
-        print(f"[8] Проверка синтаксиса (javac, файлов: {len(java_files)})...")
+        print(f"[6] Проверка синтаксиса (javac, файлов: {len(java_files)})...")
         chk = out / ".syntax_check"; chk.mkdir(exist_ok=True)
         # @argfile — иначе при тысячах файлов командная строка превышает лимит
         # Windows CreateProcess (WinError 206 "имя файла или его расширение
@@ -496,9 +597,9 @@ def main():
         if errors:
             with open(out / "Отчёт_об_ошибках_вставки.csv", "w", encoding="utf-8-sig", newline="") as fh:
                 w = csv.writer(fh, delimiter=";"); w.writerow(["Файл", "Ошибка"]); w.writerows(errors)
-            print(f"[8] !!! Ошибок: {len(errors)} — см. Отчёт_об_ошибках_вставки.csv")
+            print(f"[7] !!! Ошибок: {len(errors)} — см. Отчёт_об_ошибках_вставки.csv")
             sys.exit(2)
-        print("[8] Синтаксис OK.")
+        print("[7] Синтаксис OK.")
 
     # Pruning: оставляем только инструментированные файлы + рантайм
     _runtime_java = cq_dir / "Cqtrace.java"
@@ -514,7 +615,7 @@ def main():
         except OSError:
             pass
     if _pruned:
-        print(f"[9] Удалено неинструментированных файлов: {_pruned}")
+        print(f"[8] Удалено неинструментированных файлов: {_pruned}")
     print(f"[OK] Инструментировано. Датчиков: {len(sensor_map)}")
 
 

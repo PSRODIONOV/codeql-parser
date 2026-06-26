@@ -1151,6 +1151,7 @@ class DynamicTab(QWidget):
         self.proj.set_dynamic_state(branches_enabled=branches,
                                     extra_args=self.extra_edit.text().strip())
         self.instrument_btn.setEnabled(False)
+        self.log.append("")
         self.log.append("⏳ Инструментация…")
         self._run_subprocess(cmd, self._instrument_done)
 

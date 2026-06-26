@@ -13,6 +13,15 @@
 Золотые отчёты: reports/small-projects/java-branches/ (пути → basename).
 """
 import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "dynamic"))
+from instrument_java import _is_bootstrap_path, dedupe_probe_points, _insertion_is_valid  # noqa: E402
 
 
 def _short(fo: str) -> str:
@@ -148,3 +157,110 @@ class TestInstrumentorRegressionBugs:
             assert "branches.Cqtrace.hit(" not in src, (
                 f"{fname}: датчик вставлен полным путём branches.Cqtrace.hit(...) "
                 f"— риск коллизии с локальной переменной 'branches'")
+
+    def test_bootstrap_packages_excluded_from_extraction(self):
+        """Баг (реальный проект, full-coverage JDK): датчик в java.lang/
+        java.util/java.io/java.nio/java.lang.invoke вызывается на раннем
+        bootstrap JVM, до готовности VM диспетчеризовать вызов метода —
+        нативный SIGSEGV (не лечится re-entrancy guard / catch(Throwable) в
+        Cqtrace.hit() — тело не успевает начать исполняться). Эти ПРЯМЫЕ
+        члены пакетов (без подпакетов — java.lang.reflect/ref/annotation и
+        т.п. безопасны и должны остаться в охвате) исключаются из
+        извлечения исходников по умолчанию (см. --no-exclude-bootstrap)."""
+        excluded = [
+            "java/lang/Object.java",
+            "some/build/path/java/lang/String.java",
+            "java/lang/invoke/LambdaForm.java",
+            "java/util/HashMap.java",
+            "java/io/File.java",
+            "java/nio/Buffer.java",
+        ]
+        kept = [
+            "java/lang/reflect/Method.java",
+            "java/lang/ref/WeakReference.java",
+            "java/util/concurrent/ConcurrentHashMap.java",
+            "java/util/regex/Pattern.java",
+            "java/nio/channels/Channel.java",
+            "com/sun/corba/se/spi/activation/Foo.java",
+            "branches/BranchDemo.java",
+        ]
+        for p in excluded:
+            assert _is_bootstrap_path(p), f"{p}: должен быть исключён (bootstrap)"
+        for p in kept:
+            assert not _is_bootstrap_path(p), f"{p}: НЕ должен быть исключён"
+
+    def test_dedupe_probe_points_drops_identical_geometry(self):
+        """Баг (реальный проект, full-coverage JDK): CodeQL вернул несколько
+        Callable-сущностей (generic-инстанцирование/raw-типы) для ОДНОЙ
+        физической точки исходника — разный 'func', но идентичная позиция
+        вставки. Без дедупликации каждая лишняя строка добавляла ЕЩЁ ОДНУ
+        вставку в ту же позицию -> один try получал два finally (невалидный
+        синтаксис; 412 файлов/7600 дублей, сконцентрировано в java.io.*:
+        BufferedReader, BufferedInputStream, Bits)."""
+        pts = [
+            {"kind": "entry", "func": "a.B.m", "file": "B.java", "ref_line": 10,
+             "open_line": 10, "open_col": 20, "close_line": 15, "close_col": 5, "btype": "-"},
+            {"kind": "entry", "func": "a.B$Raw.m", "file": "B.java", "ref_line": 10,
+             "open_line": 10, "open_col": 20, "close_line": 15, "close_col": 5, "btype": "-"},
+            {"kind": "branch", "func": "a.B.m", "file": "B.java", "ref_line": 11,
+             "open_line": 11, "open_col": 8, "close_line": 0, "close_col": 0, "btype": "if"},
+        ]
+        out = dedupe_probe_points(pts, log=None)
+        assert len(out) == 2, "дубликат с идентичной геометрией должен быть отброшен"
+        assert sorted(o["kind"] for o in out) == ["branch", "entry"]
+
+    def test_jar_build_survives_stale_directory_at_target_path(self, tmp_path):
+        """Баг (реальный проект, повторная инструментация в тот же --out без
+        очистки workspace): если предыдущий прогон упал РОВНО на шаге `jar
+        -cf cqtrace-runtime.jar` (исключение из check=True прерывает скрипт
+        ДО финальной чистки .cqtrace_jar_build), на месте jar-файла может
+        остаться каталог — `jar` падает 'Cannot create a file when that
+        file already exists' на КАЖДОМ следующем прогоне. Сюда вынесена та
+        же логика очистки, что в instrument_java.py перед вызовом `jar -cf`
+        (см. main()) — реальный вызов `jar`, без мока."""
+        if shutil.which("jar") is None or shutil.which("javac") is None:
+            pytest.skip("jar/javac не найдены в PATH")
+        classes = tmp_path / "classes"
+        classes.mkdir()
+        (tmp_path / "Dummy.java").write_text("class Dummy {}", encoding="utf-8")
+        subprocess.run(["javac", "-d", str(classes), str(tmp_path / "Dummy.java")], check=True)
+
+        target = tmp_path / "cqtrace-runtime.jar"
+        # Симулируем оставшийся от прерванного прогона каталог на месте jar.
+        (target / "leftover").mkdir(parents=True)
+        assert target.is_dir()
+
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+        elif target.exists():
+            target.unlink()
+        res = subprocess.run(["jar", "-cf", str(target), "-C", str(classes), "."],
+                             capture_output=True, text=True)
+        assert res.returncode == 0, f"jar не пересобрался после очистки: {res.stderr}"
+        assert target.is_file(), "целевой путь должен стать обычным файлом jar"
+
+    def test_insertion_validity_catches_token_split(self):
+        """Баг (реальный проект, corba/.../ObjectStreamClass.getFields()):
+        недостоверная геометрия CodeQL подставила позицию ВНУТРИ идентификатора
+        — вставка датчика разрезала "getFields" на "getField" + код + "s()",
+        а закрывающая — "length" на "l" + код + "ength" (внутри ДРУГОГО
+        оператора if глубоко в теле метода). Без проверки на границу токена
+        датчик вставлялся БЕЗ ВАЛИДАЦИИ, портя синтаксис файла."""
+        sig = "    public ObjectStreamField[] getFields() {"
+        # Открывающая вставка ДОЛЖНА идти сразу после '{' сигнатуры метода.
+        brace_idx = sig.index("{")
+        assert _insertion_is_valid(sig, brace_idx + 1, prio=0)
+        # Координата CodeQL указывает внутрь "getFields" (после "getField") —
+        # ровно воспроизводит реальный кейс ("getField" + датчик + "s()").
+        bad_open = sig.index("getFields") + len("getField")
+        assert not _insertion_is_valid(sig, bad_open, prio=0)
+
+        body_line = "        if (fields.length > 0) {"
+        # Закрывающая вставка ДОЛЖНА указывать точно на '}' тела метода —
+        # эта строка вообще не содержит закрывающую скобку тела getFields(),
+        # поэтому ЛЮБАЯ позиция здесь для prio=1 недостоверна.
+        bad_close = body_line.index("length") + 1
+        assert not _insertion_is_valid(body_line, bad_close, prio=1)
+        # Контрольный пример валидного закрытия: позиция указывает на '}'.
+        closer = "    }"
+        assert _insertion_is_valid(closer, closer.index("}"), prio=1)
