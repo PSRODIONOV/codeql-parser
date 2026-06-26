@@ -28,21 +28,42 @@ HERE = Path(__file__).resolve().parent
 RUNTIME = HERE / "runtime"
 
 
+def _tool_runs(path: str) -> bool:
+    """True, если инструмент реально запускается (CreateProcess не падает).
+    Защищает от битой папки/репарс-точки third-party (WinError 1392
+    ERROR_FILE_CORRUPT) и прочих OSError: такой кандидат существует на диске
+    (Path.exists()=True), но не исполняется — его надо пропустить, а не
+    падать трейсбеком на реальном вызове."""
+    try:
+        subprocess.run([path, "-version"], capture_output=True, timeout=30)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _find_jdk_tool(tool: str):
     """Путь к инструменту JDK (javac/jar/java): сначала бандл-JDK из
     third-party/jdk* (как codeql резолвится через _find_codeql), затем PATH.
-    Возвращает None, если не найден нигде — вызывающий деградирует мягко, а
-    не падает FileNotFoundError на голом имени. Симметрично резолву JDK в
-    core/joern_analyzer.py и dynamic/instrument_php.py."""
+    Кандидат должен и существовать, и РЕАЛЬНО запускаться (_tool_runs) —
+    битый JDK (повреждённая junction → WinError 1392) пропускается в пользу
+    следующего/PATH. Возвращает None, если рабочего нет нигде — вызывающий
+    деградирует мягко, а не падает FileNotFoundError/OSError на вызове.
+    Симметрично резолву JDK в core/joern_analyzer.py и instrument_php.py."""
     exe = tool + (".exe" if os.name == "nt" else "")
     tp = HERE.parent / "third-party"
     names = (["jdk25-win", "jdk11-win"] if os.name == "nt"
              else ["jdk25-linux", "jdk11-linux", "jdk11"])
-    for name in names:
-        p = tp / name / "bin" / exe
-        if p.exists():
-            return str(p)
-    return shutil.which(tool)
+    cands = [str(tp / name / "bin" / exe) for name in names]
+    on_path = shutil.which(tool)
+    if on_path:
+        cands.append(on_path)
+    for c in cands:
+        try:
+            if Path(c).exists() and _tool_runs(c):
+                return c
+        except OSError:
+            continue
+    return None
 
 # Пакеты раннего bootstrap JVM: на старте (System.initializeSystemClass и
 # раньше) методы этих классов исполняются ДО того, как VM способна
