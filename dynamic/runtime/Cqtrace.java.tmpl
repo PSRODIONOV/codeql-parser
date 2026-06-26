@@ -111,7 +111,26 @@ public final class Cqtrace {
         }
     }
 
+    /**
+     * Защита от повторного входа: при инструментации ЦЕЛОГО проекта (включая
+     * сборку всего JDK) под сенсорами оказываются и java.util.HashMap/
+     * ArrayDeque/ArrayList/ThreadLocal/Writer — классы, на которых построен
+     * ЭТОТ САМЫЙ рантайм. Без защиты hit() → cnt.put()/stack.get()/fp.write()
+     * (инструментированы) → hit() → … бесконечная рекурсия (StackOverflowError).
+     * Гард — ПРОСТОЕ static-поле, а НЕ ThreadLocal/AtomicBoolean/synchronized:
+     * это были бы вызовы методов ДРУГИХ инструментированных классов, то есть
+     * сам гард мог бы рекурсивно вызвать hit() ещё раз. Чтение/запись boolean-
+     * поля — голый доступ без единой invoke-инструкции, рекурсия невозможна
+     * физически. Гард ГЛОБАЛЬНЫЙ (не per-thread): под конкуренцией пересечение
+     * вызовов с другого потока теряет одно событие, а не валит JVM — приемлемая
+     * плата (этот рантайм и так lossy, см. анти-спам по степени двойки ниже).
+     */
+    private static boolean inHit = false;
+
     public static void hit(int fo, int br) {
+        if (inHit) return;
+        inHit = true;
+        try {
         routeEvent(fo, br);                      // буфер маршрута — всегда (поток-локально)
         synchronized (lock) {
             long key = (((long) fo) << 32) ^ (br & 0xffffffffL);
@@ -121,6 +140,18 @@ public final class Cqtrace {
                 return;                          // не степень двойки → пропуск coverage-строки
             }
             writeLine(fo + ":" + br + "\n");
+        }
+        } catch (Throwable t) {
+            // Трассировка не должна ронять JVM/приложение — особенно на
+            // раннем бутстрапе (java.lang.invoke.LambdaForm, ASM-генераторы
+            // байткода и т.п. дёргают hit() раньше, чем у ЭТОГО класса успели
+            // выполниться static-инициализаторы cnt/stack — NPE на partially-
+            // initialized static-полях; см. JLS 12.4.2 про повторный вход в
+            // <clinit> того же потока). Гасим ЛЮБОЙ Throwable, не только
+            // IOException (как в writeLine) — на бутстрапе сценариев больше,
+            // чем можно перечислить заранее.
+        } finally {
+            inHit = false;
         }
     }
 }

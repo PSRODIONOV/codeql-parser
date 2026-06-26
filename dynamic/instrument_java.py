@@ -434,8 +434,12 @@ def main():
     jar_src.mkdir(parents=True, exist_ok=True)
     (jar_src / "Cqtrace.java").write_text(cq, encoding="utf-8")
     jar_classes = jar_build / "classes"; jar_classes.mkdir(exist_ok=True)
-    rj = subprocess.run(["javac", "-d", str(jar_classes), str(jar_src / "Cqtrace.java")],
-                        capture_output=True, text=True)
+    # -encoding utf-8 обязателен: Cqtrace.java.tmpl содержит кириллические
+    # комментарии, а javac без явной кодировки берёт платформную (cp1251 на
+    # русской Windows) и падает "unmappable character for encoding Cp1251" —
+    # сборка jar отваливалась бы НА ЛЮБОЙ такой машине независимо от проекта.
+    rj = subprocess.run(["javac", "-encoding", "utf-8", "-d", str(jar_classes),
+                        str(jar_src / "Cqtrace.java")], capture_output=True, text=True)
     if rj.returncode == 0:
         cqtrace_jar = out / "cqtrace-runtime.jar"
         subprocess.run(["jar", "-cf", str(cqtrace_jar), "-C", str(jar_classes), "."], check=True)
@@ -479,7 +483,7 @@ def main():
         with open(argfile, "w", encoding="utf-8") as fh:
             for jf in java_files:
                 fh.write(f'"{jf}"\n' if " " in jf else jf + "\n")
-        javac_cmd = ["javac", "-d", str(chk)]
+        javac_cmd = ["javac", "-encoding", "utf-8", "-d", str(chk)]
         if cqtrace_jar:
             javac_cmd += ["-classpath", str(cqtrace_jar)]
         javac_cmd.append(f"@{argfile.name}")
