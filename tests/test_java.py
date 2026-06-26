@@ -104,11 +104,11 @@ class TestInstrumentorRegressionBugs:
         TestSensorMap.test_overloaded_methods_get_distinct_fo_numbers — здесь
         проверяется побайтово, что вставка не разрезала код)."""
         src = (java_branches_instrumented_src / "branches" / "BranchDemo.java").read_text(encoding="utf-8")
-        m1 = re.search(r'public String helper\(\) \{ branches\.Cqtrace\.hit\((\d+), 0\); try \{\s*'
-                       r'return "no-arg";\s*\} finally \{ branches\.Cqtrace\.hit\(\1, -1\); \} \}', src)
-        m2 = re.search(r'public String helper\(int x\) \{ branches\.Cqtrace\.hit\((\d+), 0\); try \{\s*'
+        m1 = re.search(r'public String helper\(\) \{ Cqtrace\.hit\((\d+), 0\); try \{\s*'
+                       r'return "no-arg";\s*\} finally \{ Cqtrace\.hit\(\1, -1\); \} \}', src)
+        m2 = re.search(r'public String helper\(int x\) \{ Cqtrace\.hit\((\d+), 0\); try \{\s*'
                        r'return x > 0 \? "positive" : "non-positive";\s*'
-                       r'\} finally \{ branches\.Cqtrace\.hit\(\1, -1\); \} \}', src)
+                       r'\} finally \{ Cqtrace\.hit\(\1, -1\); \} \}', src)
         assert m1, "helper() не инструментирован корректно"
         assert m2, "helper(int) не инструментирован корректно"
         assert m1.group(1) != m2.group(1), "перегрузки получили ОДИНАКОВЫЙ № ФО"
@@ -118,9 +118,9 @@ class TestInstrumentorRegressionBugs:
         встать ПОСЛЕ super(), а не до него (вызов super() ВСЕГДА должен
         оставаться первым оператором тела конструктора в Java)."""
         src = (java_branches_instrumented_src / "branches" / "OtherDemo.java").read_text(encoding="utf-8")
-        assert re.search(r"super\(\);\s*branches\.Cqtrace\.hit\(\d+, 0\); try \{", src), (
+        assert re.search(r"super\(\);\s*Cqtrace\.hit\(\d+, 0\); try \{", src), (
             "датчик входа не сразу после super()")
-        assert not re.search(r"branches\.Cqtrace\.hit\(\d+, 0\);.*super\(\);", src, re.S), (
+        assert not re.search(r"Cqtrace\.hit\(\d+, 0\);.*super\(\);", src, re.S), (
             "датчик входа вставлен ДО super()"
         )
 
@@ -128,3 +128,23 @@ class TestInstrumentorRegressionBugs:
         for fname in ("BranchDemo.java", "Main.java", "OtherDemo.java"):
             src = (java_branches_instrumented_src / "branches" / fname).read_text(encoding="utf-8")
             assert src.count("{") == src.count("}"), f"{fname}: несбалансированные {{}}"
+
+    def test_sensor_call_uses_simple_name_not_qualified_path(self, java_branches_instrumented_src):
+        """Баг (реальный проект, gen_profile/gosjava-класс): датчик НЕ должен
+        вставляться как полный путь '<pkg>.Cqtrace.hit(...)' — первый сегмент
+        пакета (com/sun/se/spi и т.п.) резолвится Java как ОБЫЧНОЕ простое
+        имя, и если в области видимости есть локальная переменная/параметр с
+        этим же именем (частый случай: 'String com = ...;'), компилятор
+        трактует 'com.sun....' как доступ к полю на этой переменной, а не
+        как путь к пакету — гарантированная ошибка компиляции (см.
+        ConstantSetNode.java: 'String com = constantMap.get(key); if (com ==
+        null) { com.sun....hit(...)'). Вместо этого должен использоваться
+        import + простое имя типа 'Cqtrace.hit(...)' — оно не подменяется
+        переменной с другим именем."""
+        for fname in ("BranchDemo.java", "Main.java", "OtherDemo.java"):
+            src = (java_branches_instrumented_src / "branches" / fname).read_text(encoding="utf-8")
+            assert "import branches.Cqtrace;" in src, f"{fname}: нет import Cqtrace"
+            assert "Cqtrace.hit(" in src, f"{fname}: не найден вызов Cqtrace.hit(...)"
+            assert "branches.Cqtrace.hit(" not in src, (
+                f"{fname}: датчик вставлен полным путём branches.Cqtrace.hit(...) "
+                f"— риск коллизии с локальной переменной 'branches'")

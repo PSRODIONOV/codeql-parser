@@ -269,8 +269,32 @@ def main():
 
     all_java = list(out.rglob("*.java"))
     pkg = args.cqtrace_package or detect_package(all_java)
-    ref = (pkg + ".Cqtrace") if pkg else "Cqtrace"
-    print(f"    Пакет Cqtrace: {pkg or '(default)'} → ссылка {ref}.hit(...)")
+    # ВАЖНО: ссылка на датчик — ПРОСТОЕ имя "Cqtrace.hit(...)", НЕ полный путь
+    # "<pkg>.Cqtrace.hit(...)". При полном пути ПЕРВЫЙ сегмент пакета (com,
+    # sun, se, spi, java, org — частые куски реальных имён) резолвится Java
+    # как обычное простое имя: если в зоне видимости есть локальная
+    # переменная/параметр/поле с ЭТИМ ЖЕ именем (своя частая история: "String
+    # com = ...", параметр "se", и т.п.), компилятор трактует "com.sun...." как
+    # доступ к полю на этой переменной, а не как путь пакета — гарантированная
+    # ошибка компиляции на ЛЮБОМ файле с таким совпадением (см. реальный кейс:
+    # ConstantSetNode.java — `String com = ...; if (com == null) {
+    # com.sun....hit(...)`). Простое имя класса такой проблемы не создаёт:
+    # 1) вызов метода `hit(...)` после import static резолвится Java ТОЛЬКО
+    # среди методов (отдельное пространство имён от переменных — JLS 6.5.5/
+    # 6.5.6) и переменной не подменяется НИКОГДА; 2) при простом доступе
+    # "Cqtrace.hit(...)" риск коллизии остаётся только с переменной, буквально
+    # названной "Cqtrace" — на практике не встречается (не словарное слово).
+    # Поэтому используем import + простое имя типа, а не import static:
+    # static-импорт рискует столкнуться с СОБСТВЕННЫМ методом класса по имени
+    # "hit" (member функции приоритетнее static-импорта при разрешении вызова
+    # без квалификатора), простое имя ТИПА — гораздо более редкая коллизия.
+    # Сам импорт вставляется в КАЖДЫЙ инструментированный файл отдельным
+    # проходом ниже (после применения вставок датчиков, чтобы не сдвигать
+    # номера строк, которыми оперирует probe_points.ql).
+    ref = "Cqtrace"
+    print(f"    Пакет Cqtrace: {pkg or '(default)'} → ссылка {ref}.hit(...) "
+          f"(+ import {pkg}.Cqtrace; в каждый инструментированный файл)" if pkg
+          else f"    Пакет Cqtrace: (default) → ссылка {ref}.hit(...)")
 
     # Индекс по basename → [(relpath, Path)] для сопоставления по относительному пути.
     from collections import defaultdict
@@ -342,6 +366,26 @@ def main():
                 dropped_sids.add(sid_); continue
             lines[idx] = ln[:eff] + text + ln[eff:] + nl
         fp.write_text("".join(lines), encoding="utf-8")
+
+    # import <pkg>.Cqtrace; в КАЖДЫЙ инструментированный файл — отдельным
+    # проходом ПОСЛЕ применения вставок датчиков (строки/колонки выше — из
+    # probe_points.ql, привязаны к ИСХОДНОЙ нумерации строк; вставка лишней
+    # строки до этого момента сдвинула бы все последующие координаты).
+    # Без пакета (default package) импорт не нужен и невозможен (классы
+    # default package не импортируются) — там ref="Cqtrace" работает только
+    # если вызывающий файл САМ в default package (см. ref/print выше).
+    if pkg:
+        _pkg_re = re.compile(r'^\s*package\s+[\w.]+\s*;', re.M)
+        _import_line = f"import {pkg}.Cqtrace;\n"
+        for fp in touched:
+            text = fp.read_text(encoding="utf-8", errors="ignore")
+            m = _pkg_re.search(text)
+            if m:
+                nl_idx = text.find("\n", m.end())
+                pos = nl_idx + 1 if nl_idx != -1 else len(text)
+            else:
+                pos = 0
+            fp.write_text(text[:pos] + _import_line + text[pos:], encoding="utf-8")
 
     if dropped_sids:
         sensor_map = [sm for sm in sensor_map if sm[0] not in dropped_sids]
