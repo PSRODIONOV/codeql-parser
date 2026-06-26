@@ -27,6 +27,23 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RUNTIME = HERE / "runtime"
 
+
+def _find_jdk_tool(tool: str):
+    """Путь к инструменту JDK (javac/jar/java): сначала бандл-JDK из
+    third-party/jdk* (как codeql резолвится через _find_codeql), затем PATH.
+    Возвращает None, если не найден нигде — вызывающий деградирует мягко, а
+    не падает FileNotFoundError на голом имени. Симметрично резолву JDK в
+    core/joern_analyzer.py и dynamic/instrument_php.py."""
+    exe = tool + (".exe" if os.name == "nt" else "")
+    tp = HERE.parent / "third-party"
+    names = (["jdk25-win", "jdk11-win"] if os.name == "nt"
+             else ["jdk25-linux", "jdk11-linux", "jdk11"])
+    for name in names:
+        p = tp / name / "bin" / exe
+        if p.exists():
+            return str(p)
+    return shutil.which(tool)
+
 # Пакеты раннего bootstrap JVM: на старте (System.initializeSystemClass и
 # раньше) методы этих классов исполняются ДО того, как VM способна
 # диспетчеризовать вызов Cqtrace.hit(...) — попытка такого вызова уходит в
@@ -515,44 +532,59 @@ def main():
     # gen_profile_2/3/gensrc), а если они всё же компилируются РАЗНО по
     # разным выходным деревьям — состояние датчиков (счётчики, маршруты
     # R:/C:) расщепляется по экземплярам класса вместо одного общего.
+    # javac/jar резолвим как codeql (_find_codeql): сначала бандл-JDK из
+    # third-party/jdk*, затем PATH. Без этого на типичной GUI-поставке (JDK не
+    # в PATH, JAVA_HOME не задан) шаг падал FileNotFoundError на голом "javac".
+    javac = _find_jdk_tool("javac")
+    jar_tool = _find_jdk_tool("jar")
+
     cqtrace_jar = None
-    jar_build = out / ".cqtrace_jar_build"
-    jar_build.mkdir(exist_ok=True)
-    jar_src = jar_build / "src" / (Path(*pkg.split(".")) if pkg else Path("."))
-    jar_src.mkdir(parents=True, exist_ok=True)
-    (jar_src / "Cqtrace.java").write_text(cq, encoding="utf-8")
-    jar_classes = jar_build / "classes"; jar_classes.mkdir(exist_ok=True)
-    # -encoding utf-8 обязателен: Cqtrace.java.tmpl содержит кириллические
-    # комментарии, а javac без явной кодировки берёт платформную (cp1251 на
-    # русской Windows) и падает "unmappable character for encoding Cp1251" —
-    # сборка jar отваливалась бы НА ЛЮБОЙ такой машине независимо от проекта.
-    rj = subprocess.run(["javac", "-encoding", "utf-8", "-d", str(jar_classes),
-                        str(jar_src / "Cqtrace.java")], capture_output=True, text=True)
-    if rj.returncode == 0:
-        cqtrace_jar = out / "cqtrace-runtime.jar"
-        # Повторная инструментация в ТОТ ЖЕ --out (без очистки workspace
-        # между прогонами — обычный случай при итеративной доводке большого
-        # проекта): если предыдущий прогон упал РОВНО на этом шаге (см.
-        # check=True ниже — исключение прерывает скрипт ДО финальной чистки
-        # .cqtrace_jar_build), на диске может остаться объект с этим именем,
-        # несовместимый с открытием на запись через FileOutputStream — `jar`
-        # падает "Cannot create a file when that file already exists" (если
-        # это каталог). Без явной чистки скрипт ломался на ЛЮБОМ повторном
-        # запуске после первого сбоя именно тут.
-        if cqtrace_jar.is_dir():
-            shutil.rmtree(cqtrace_jar, ignore_errors=True)
-        elif cqtrace_jar.exists():
-            cqtrace_jar.unlink()
-        subprocess.run(["jar", "-cf", str(cqtrace_jar), "-C", str(jar_classes), "."], check=True)
-        print(f"[5.2] Рантайм (jar): {cqtrace_jar.relative_to(out)} — добавьте в CLASSPATH "
-              f"сборки (напр. export CLASSPATH=\"$CLASSPATH:{cqtrace_jar}\"), если "
-              f"пакет {pkg or '(default)'} компилируется НЕСКОЛЬКИМИ независимыми "
-              f"javac-вызовами с разным sourcepath (модульная/legacy-сборка).")
+    if not javac:
+        print("[5.2] !!! javac не найден (ни в third-party/jdk*, ни в PATH) — "
+              "cqtrace-runtime.jar не собран. Датчики уже вставлены; чтобы собрать "
+              "jar и проверить синтаксис, поставьте JDK (напр. third-party/jdk25-win) "
+              "или добавьте javac в PATH.")
     else:
-        print(f"[5.2] !!! Не удалось собрать cqtrace-runtime.jar: "
-              f"{rj.stderr.strip().splitlines()[-1] if rj.stderr.strip() else rj.returncode} "
-              f"— остаётся только исходник, см. выше.")
-    shutil.rmtree(jar_build, ignore_errors=True)
+        jar_build = out / ".cqtrace_jar_build"
+        jar_build.mkdir(exist_ok=True)
+        jar_src = jar_build / "src" / (Path(*pkg.split(".")) if pkg else Path("."))
+        jar_src.mkdir(parents=True, exist_ok=True)
+        (jar_src / "Cqtrace.java").write_text(cq, encoding="utf-8")
+        jar_classes = jar_build / "classes"; jar_classes.mkdir(exist_ok=True)
+        # -encoding utf-8 обязателен: Cqtrace.java.tmpl содержит кириллические
+        # комментарии, а javac без явной кодировки берёт платформную (cp1251 на
+        # русской Windows) и падает "unmappable character for encoding Cp1251" —
+        # сборка jar отваливалась бы НА ЛЮБОЙ такой машине независимо от проекта.
+        rj = subprocess.run([javac, "-encoding", "utf-8", "-d", str(jar_classes),
+                            str(jar_src / "Cqtrace.java")], capture_output=True, text=True)
+        if rj.returncode == 0 and jar_tool:
+            cqtrace_jar = out / "cqtrace-runtime.jar"
+            # Повторная инструментация в ТОТ ЖЕ --out (без очистки workspace
+            # между прогонами — обычный случай при итеративной доводке большого
+            # проекта): если предыдущий прогон упал РОВНО на этом шаге (см.
+            # check=True ниже — исключение прерывает скрипт ДО финальной чистки
+            # .cqtrace_jar_build), на диске может остаться объект с этим именем,
+            # несовместимый с открытием на запись через FileOutputStream — `jar`
+            # падает "Cannot create a file when that file already exists" (если
+            # это каталог). Без явной чистки скрипт ломался на ЛЮБОМ повторном
+            # запуске после первого сбоя именно тут.
+            if cqtrace_jar.is_dir():
+                shutil.rmtree(cqtrace_jar, ignore_errors=True)
+            elif cqtrace_jar.exists():
+                cqtrace_jar.unlink()
+            subprocess.run([jar_tool, "-cf", str(cqtrace_jar), "-C", str(jar_classes), "."], check=True)
+            print(f"[5.2] Рантайм (jar): {cqtrace_jar.relative_to(out)} — добавьте в CLASSPATH "
+                  f"сборки (напр. export CLASSPATH=\"$CLASSPATH:{cqtrace_jar}\"), если "
+                  f"пакет {pkg or '(default)'} компилируется НЕСКОЛЬКИМИ независимыми "
+                  f"javac-вызовами с разным sourcepath (модульная/legacy-сборка).")
+        elif rj.returncode == 0:
+            print("[5.2] !!! Cqtrace.java скомпилирован, но jar не найден "
+                  "(third-party/jdk*/PATH) — jar не собран, остаётся только исходник.")
+        else:
+            print(f"[5.2] !!! Не удалось собрать cqtrace-runtime.jar: "
+                  f"{rj.stderr.strip().splitlines()[-1] if rj.stderr.strip() else rj.returncode} "
+                  f"— остаётся только исходник, см. выше.")
+        shutil.rmtree(jar_build, ignore_errors=True)
 
     with open(out / "Карта_датчиков.csv", "w", encoding="utf-8-sig", newline="") as fh:
         w = csv.writer(fh, delimiter=";")
@@ -561,8 +593,10 @@ def main():
 
     # Проверка синтаксиса — javac всех плоских .java (только для мелких проектов).
     # Для проектов со своей сборкой (Maven/Gradle) её роль выполняет последующая сборка.
-    if args.no_syntax_check:
-        print("[6] Проверка синтаксиса пропущена (--no-syntax-check; проверит сборка).")
+    if args.no_syntax_check or not javac:
+        _why = ("--no-syntax-check; проверит сборка" if args.no_syntax_check
+                else "javac недоступен (нет JDK в third-party/jdk*/PATH)")
+        print(f"[6] Проверка синтаксиса пропущена ({_why}).")
     else:
         # Cqtrace резолвим через cqtrace_jar (-classpath), а не добавлением
         # исходника cq_dir/Cqtrace.java в файлы компиляции: если бы класс
@@ -584,7 +618,7 @@ def main():
         with open(argfile, "w", encoding="utf-8") as fh:
             for jf in java_files:
                 fh.write(f'"{jf}"\n' if " " in jf else jf + "\n")
-        javac_cmd = ["javac", "-encoding", "utf-8", "-d", str(chk)]
+        javac_cmd = [javac, "-encoding", "utf-8", "-d", str(chk)]
         if cqtrace_jar:
             javac_cmd += ["-classpath", str(cqtrace_jar)]
         javac_cmd.append(f"@{argfile.name}")
