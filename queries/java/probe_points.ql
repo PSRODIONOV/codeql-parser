@@ -4,14 +4,18 @@
  * entry  — тело ФО оборачивается: после `{` (или после super()/this() в
  *          конструкторе) вставляется `hit(fo,0); try {`, перед `}` тела —
  *          `} finally { hit(fo,-1); }`.
- * branch — после `{` блока ветви (then/тело/try) вставляется `hit(fo,br)`.
+ * branch — после `{` блока ветви (then/тело/try/catch/else) вставляется
+ *          `hit(fo,br)`; для case/default (has_block=2) — сразу после ':'
+ *          метки, без обёртки в {} (см. has_block=2 ниже, мирроринг
+ *          queries/cpp/probe_points.ql).
  *
  * Колонки: kind; func; file; ref_line; ins_line; ins_col; has_block; btype;
  * end_line; end_col — НАЗВАНИЯ СОВПАДАЮТ с queries/cpp/probe_points.ql (см.
  * RAW_SCHEMA["q_probe"] в core/project_db.py: одна таблица project.db делится
- * между языками по именам колонок). has_block здесь всегда "1" — у Java нет
- * безблочных (без {}) форм веток/тел в текущей геометрии (branchBlock/explicitCtorCall
- * выбирают только BlockStmt), в отличие от C/C++.
+ * между языками по именам колонок). has_block=1 везде, КРОМЕ case/default
+ * (has_block=2) — у Java нет безблочных (без {}) форм if/for/while/do/try
+ * в текущей геометрии (branchBlock/explicitCtorCall выбирают только
+ * BlockStmt), в отличие от C/C++.
  */
 import java
 
@@ -21,10 +25,15 @@ string qname(Callable c) {
   result = c.getDeclaringType().getQualifiedName() + "." + c.getName()
 }
 
+// EnhancedForStmt (for-each) НЕ отслеживается — паритет с C++, где range-based
+// for (CXXForRangeStmt) тоже не даёт ветви: итерация "для каждого элемента"
+// не содержит наблюдаемой точки решения (нет условия, которое могло бы
+// принять разные значения true/false), в отличие от классического ForStmt
+// с явным условием выхода. См. docs/PRINCIPLES_C_CPP.md.
 string branchType(Stmt s) {
   s instanceof IfStmt and result = "if"
   or
-  (s instanceof ForStmt or s instanceof EnhancedForStmt) and result = "for"
+  s instanceof ForStmt and result = "for"
   or
   s instanceof WhileStmt and result = "while"
   or
@@ -38,13 +47,23 @@ BlockStmt branchBlock(Stmt s) {
   or
   result = s.(ForStmt).getStmt()
   or
-  result = s.(EnhancedForStmt).getStmt()
-  or
   result = s.(WhileStmt).getStmt()
   or
   result = s.(DoStmt).getStmt()
   or
   result = s.(TryStmt).getBlock()
+}
+
+// Plain else (НЕ else-if — там getElse() возвращает IfStmt, не BlockStmt,
+// и просто не унифицируется с результатом BlockStmt-типа). else-if
+// продолжает обрабатываться как обычный IfStmt в основной branch-клаузе.
+BlockStmt elseBlock(IfStmt s) { s.getElse() = result }
+
+// "default" или "case" — аналог caseBtype в queries/cpp/probe_points.ql.
+string caseBtype(SwitchCase sc) {
+  sc instanceof DefaultCase and result = "default"
+  or
+  not sc instanceof DefaultCase and result = "case"
 }
 
 predicate explicitCtorCall(BlockStmt b, Stmt first) {
@@ -113,6 +132,68 @@ predicate probe(
     end_line = 0 and
     end_col = 0 and
     btype = branchType(s)
+  )
+  or
+  // Plain else (else-if обрабатывается выше как обычный IfStmt).
+  exists(IfStmt ifs, BlockStmt b |
+    isProjectFile(ifs.getCompilationUnit().getFile()) and
+    b = elseBlock(ifs) and
+    not exists(FunctionalExpr fe | fe.asMethod() = ifs.getEnclosingCallable())
+  |
+    kind = "branch" and
+    func = qname(ifs.getEnclosingCallable()) and
+    file = ifs.getCompilationUnit().getFile().getAbsolutePath() and
+    ref_line = ifs.getLocation().getStartLine() and
+    ins_line = b.getLocation().getStartLine() and
+    ins_col = b.getLocation().getStartColumn() and
+    has_block = 1 and
+    end_line = 0 and
+    end_col = 0 and
+    btype = "else"
+  )
+  or
+  // switch case/default — метки делят ОДИН общий блок тела switch (нет
+  // своих {}), датчик вставляется ПРЯМО после ':' метки (has_block=2),
+  // см. подробный комментарий о том же в queries/cpp/probe_points.ql.
+  exists(SwitchStmt sw, SwitchCase sc |
+    sc = sw.getACase() and
+    isProjectFile(sc.getCompilationUnit().getFile()) and
+    not exists(FunctionalExpr fe | fe.asMethod() = sw.getEnclosingCallable())
+  |
+    kind = "branch" and
+    func = qname(sw.getEnclosingCallable()) and
+    file = sc.getCompilationUnit().getFile().getAbsolutePath() and
+    // refLine — строка самой метки (как у cpp): по ней инструментатор ищет
+    // номер ветви в Перечень_ветвей, где каждая метка — отдельная строка.
+    ref_line = sc.getLocation().getStartLine() and
+    ins_line = sc.getLocation().getEndLine() and
+    ins_col = sc.getLocation().getEndColumn() + 1 and
+    has_block = 2 and
+    btype = caseBtype(sc) and
+    end_line = sc.getLocation().getEndLine() and
+    end_col = sc.getLocation().getEndColumn()
+  )
+  or
+  // catch — тело уже целиком в {} (как у try), тот же has_block=1.
+  // ref_line — строка САМОГО try (как у cpp): catch делит номер ветви с
+  // try-точкой того же TryStmt (Перечень_ветвей не содержит отдельной
+  // строки для catch — это датчик ПОКРЫТИЯ, не отдельная "ветвь", см.
+  // docs/PRINCIPLES_C_CPP.md), поэтому _lookup_br находит ту же запись.
+  exists(TryStmt t, CatchClause cc |
+    cc = t.getACatchClause() and
+    isProjectFile(cc.getCompilationUnit().getFile()) and
+    not exists(FunctionalExpr fe | fe.asMethod() = cc.getBlock().getEnclosingCallable())
+  |
+    kind = "branch" and
+    func = qname(cc.getBlock().getEnclosingCallable()) and
+    file = cc.getCompilationUnit().getFile().getAbsolutePath() and
+    ref_line = t.getLocation().getStartLine() and
+    ins_line = cc.getBlock().getLocation().getStartLine() and
+    ins_col = cc.getBlock().getLocation().getStartColumn() and
+    has_block = 1 and
+    end_line = 0 and
+    end_col = 0 and
+    btype = "catch"
   )
 }
 

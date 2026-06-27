@@ -23,19 +23,36 @@ int getFullEndLine(Stmt s) {
   result = max(Element e | e = s.getAChild*() | e.getLocation().getEndLine())
 }
 
-/** Классификация оператора по типу для блок-схемы */
+/** "case X" или "default" — для метки/типа case-точки switch (как в C++). */
+predicate isDefaultCase(SwitchCase sc) { sc instanceof DefaultCase }
+
+/** Классификация оператора по типу для блок-схемы. EnhancedForStmt
+ * (for-each) НЕ отслеживается — паритет с C++ (range-based for тоже без
+ * ветви, см. probe_points.ql). */
 string getStmtType(Stmt s) {
   s instanceof IfStmt and result = "if"
   or
-  (s instanceof ForStmt or s instanceof EnhancedForStmt) and result = "for"
+  s instanceof ForStmt and result = "for"
   or
-  (s instanceof WhileStmt or s instanceof DoStmt) and result = "while"
+  s instanceof WhileStmt and result = "while"
+  or
+  s instanceof DoStmt and result = "do"
   or
   s instanceof ReturnStmt and result = "return"
   or
   s instanceof ThrowStmt and result = "throw"
   or
   s instanceof TryStmt and result = "try"
+  or
+  s instanceof SwitchStmt and result = "switch"
+  or
+  // case/default — НЕ собственный узел блок-схемы (как и else), а метка
+  // границы ветви switch; см. _build_hierarchy/_render_node в
+  // viz/flowchart_generator.py — case-строки используются только для
+  // партиционирования и текста на ребре (мирроринг queries/cpp/function_flow.ql).
+  s instanceof SwitchCase and isDefaultCase(s) and result = "default"
+  or
+  s instanceof SwitchCase and not isDefaultCase(s) and result = "case"
   or
   s instanceof BreakStmt and result = "break"
   or

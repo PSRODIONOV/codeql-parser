@@ -1,14 +1,19 @@
 """Регресс Java-инструментатора (small-projects/test-project-java-branches).
 
-Минимальная фикстура для доводки instrument_java.py до инфраструктурной
-параллели с C/C++ (--trace-tag, --project-db, --include-list/--exclude-list,
-извлечение исходников прямо из src.zip БД, дисамбигуация одноимённых
-методов по файлу+строке, dropped_sids). Покрывает:
-  • определение ветвей (Перечень_ветвей.csv): if/else, for, while, try;
+Проект расширен до паритета по охвату с test-project-cpp-branches (см.
+docs/PRINCIPLES_C_CPP.md): if/else, for/while/do, switch case/default
+(fallthrough-группы), try/catch/finally (catch делит № ветви с try — датчик
+покрытия, не отдельная ветвь, см. probe_points.ql), вложенность, и
+негативы — enhanced-for, тернарный ?:, && / || (НЕ дают ветвей). Покрывает:
+  • определение ветвей (Перечень_ветвей.csv): if/else/for/while/do/try/
+    case/default — паритет типов с C++ (см. queries/cpp/function_flow.ql);
   • дисамбигуация перегрузки helper()/helper(int) — общий qname
     "branches.BranchDemo.helper", разные № ФО (см. _lookup_fo);
-  • датчики (Карта_датчиков.csv): вход/выход у каждого ФО, явный super();
-  • покрытие (Покрытие_ветвей.csv): все ветви исполняются.
+  • датчики (Карта_датчиков.csv): вход/выход у каждого ФО, явный super(),
+    else как отдельный датчик (делит № ветви с if), catch (делит № ветви
+    с try, НЕ попадает в Перечень_ветвей — датчик покрытия);
+  • покрытие (Покрытие_ветвей.csv): все ветви исполняются (Main.java
+    вызывает каждый метод так, чтобы сработала каждая ветвь).
 
 Золотые отчёты: reports/small-projects/java-branches/ (пути → basename).
 """
@@ -36,7 +41,13 @@ def types_of(rows):
     return [r.get("Тип", "") for r in rows]
 
 
-TOTAL_BRANCHES = 5
+TOTAL_BRANCHES = 42
+# Сенсоры branch-типа в Карта_датчиков.csv = TOTAL_BRANCHES + catch-датчики
+# (catch делит № ветви с try, своей строки в Перечень_ветвей у него нет —
+# см. probe_points.ql и docs/PRINCIPLES_C_CPP.md). 8 catch — по числу
+# CatchClause во всём проекте (simpleTry:1, tryMultipleCatch:3, nestedTry:2,
+# tryWithLoop:1, BranchDemo.tryBranch:1; tryFinally — без catch, 0).
+TOTAL_CATCH_SENSORS = 8
 
 
 class TestBranchDetection:
@@ -58,6 +69,37 @@ class TestBranchDetection:
         """helper()/helper(int) — без веток (тернарный оператор не
         отслеживается); коллизия имён проверяется на уровне ФО, не ветвей."""
         assert branches_of(java_branches_inventory, "helper") == []
+
+    def test_do_while_distinct_from_while(self, java_branches_inventory):
+        """do-while должен классифицироваться как 'do', а не слипаться с
+        'while' (баг function_flow.ql: getStmtType конфлировал WhileStmt и
+        DoStmt в одно значение 'while' — паритет с C++ требует, чтобы
+        do-while был отдельным типом, как в probe_points.ql)."""
+        assert types_of(branches_of(java_branches_inventory, "doWhileDemo")) == ["do"]
+        assert types_of(branches_of(java_branches_inventory, "countDownWhile")) == ["while"]
+
+    def test_switch_case_default_tracked(self, java_branches_inventory):
+        """Каждая case-метка (включая участников fallthrough-группы) и
+        default — отдельная ветвь, паритет с C++ (см.
+        queries/cpp/probe_points.ql: caseBtype/hasBlock=2)."""
+        rows = branches_of(java_branches_inventory, "weekdayKind")
+        assert types_of(rows) == ["case"] * 7 + ["default"]
+        rows2 = branches_of(java_branches_inventory, "fallthroughSum")
+        assert types_of(rows2) == ["case", "case", "default"]
+
+    def test_try_catch_finally_nesting(self, java_branches_inventory):
+        """try получает свою ветвь на каждый уровень вложенности; catch и
+        finally — НЕ отдельные ветви (нет точки решения, см. getInCatchMarker
+        / docs/PRINCIPLES_C_CPP.md)."""
+        assert types_of(branches_of(java_branches_inventory, "nestedTry")) == ["try", "try", "if"]
+        assert types_of(branches_of(java_branches_inventory, "tryFinally")) == ["try"]
+
+    def test_enhanced_for_and_logical_ops_are_negatives(self, java_branches_inventory):
+        """enhanced-for (for-each), тернарный ?: и && / || — НЕ дают
+        ветвей: паритет с C++ (range-based for/?:/&&/||, см.
+        negative_demo.cpp в test-project-cpp-branches)."""
+        assert branches_of(java_branches_inventory, "sumRange") == []
+        assert branches_of(java_branches_inventory, "signAndFlags") == []
 
 
 class TestSensorMap:
@@ -90,10 +132,39 @@ class TestSensorMap:
         assert entries and entries == exits
 
     def test_branch_sensors_numbered(self, java_branches_sensors):
+        """branch-датчиков больше, чем строк в Перечень_ветвей, ровно на
+        число catch-обработчиков: else получает СВОЙ датчик (делит № ветви
+        с if — см. test_else_sensor_shares_branch_num_with_if), а catch
+        делит № ветви с try и добавляет датчик ПОКРЫТИЯ сверх
+        TOTAL_BRANCHES (своей строки в Перечень_ветвей у catch нет)."""
         branch_rows = [r for r in java_branches_sensors if r.get("Запись (br)") not in ("0", "-1")]
-        assert len(branch_rows) == TOTAL_BRANCHES - 1, (
-            "5 ветвей в статике, но 'else' без отдельного датчика (см. probe_points.ql) "
-            "-> 4 датчика ветвей")
+        assert len(branch_rows) == TOTAL_BRANCHES + TOTAL_CATCH_SENSORS
+
+    def test_else_sensor_shares_branch_num_with_if(self, java_branches_sensors):
+        """Паритет с C++: else получает СВОЙ датчик (своя строка/позиция в
+        исходнике), но № ветви — ТОТ ЖЕ, что у if (одна точка решения, два
+        исхода), см. queries/java/probe_points.ql: elseBlock/btype='else'."""
+        ifs = [r for r in java_branches_sensors if r.get("Тип") == "if"]
+        elses = [r for r in java_branches_sensors if r.get("Тип") == "else"]
+        assert ifs and elses
+        if_branch = next(r for r in ifs if r.get("№ ФО") == elses[0].get("№ ФО"))
+        assert if_branch.get("Запись (br)") == elses[0].get("Запись (br)")
+
+    def test_catch_sensor_shares_branch_num_with_try_not_in_inventory(
+            self, java_branches_sensors, java_branches_inventory):
+        """catch — датчик ПОКРЫТИЯ: есть в Карта_датчиков.csv (делит № ветви
+        с try того же TryStmt), но НЕТ собственной строки в
+        Перечень_ветвей.csv (не точка решения — вход определяется
+        исключением, а не кодом), паритет с C++."""
+        catches = [r for r in java_branches_sensors if r.get("Тип") == "catch"]
+        assert len(catches) == TOTAL_CATCH_SENSORS
+        assert all(r.get("Тип") == "catch" for r in catches)
+        assert not [r for r in java_branches_inventory if r.get("Тип") == "catch"], (
+            "catch не должен попадать в Перечень_ветвей")
+        tries = {r.get("№ ФО"): r.get("Запись (br)")
+                 for r in java_branches_sensors if r.get("Тип") == "try"}
+        for c in catches:
+            assert tries.get(c.get("№ ФО")) is not None
 
 
 class TestCoverage:

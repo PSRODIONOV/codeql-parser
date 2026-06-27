@@ -179,6 +179,7 @@ def run_probe_query(codeql, db, query, path_pattern="%"):
             if len(row) < 10: continue
             pts.append({"kind": row[0], "func": row[1], "file": row[2],
                         "ref_line": int(row[3]), "open_line": int(row[4]), "open_col": int(row[5]),
+                        "has_block": int(row[6]),
                         "close_line": int(row[8]), "close_col": int(row[9]), "btype": row[7]})
     return pts
 
@@ -210,7 +211,8 @@ def read_probe_points_from_db(project_db_path: str):
         pts.append({
             "kind": r.get("kind", ""), "func": r.get("func", ""), "file": r.get("file", ""),
             "ref_line": _i(r.get("ref_line")), "open_line": _i(r.get("ins_line")),
-            "open_col": _i(r.get("ins_col")), "close_line": _i(r.get("end_line")),
+            "open_col": _i(r.get("ins_col")), "has_block": _i(r.get("has_block")),
+            "close_line": _i(r.get("end_line")),
             "close_col": _i(r.get("end_col")), "btype": r.get("btype", ""),
         })
     return pts
@@ -244,21 +246,34 @@ def dedupe_probe_points(pts, log=print):
     return out
 
 
-def _insertion_is_valid(ln: str, eff: int, prio: int) -> bool:
+def _insertion_is_valid(ln: str, eff: int, prio: int, has_block: int = 1) -> bool:
     """Геометрия из CodeQL иногда не попадает на границу токена (реальный
     кейс: com.sun.corba...ObjectStreamClass.getFields() — вставка пришлась
     ВНУТРЬ имени метода/переменной, разрезав идентификатор пополам:
     "getField" + датчик + "s()", а закрывающая — внутрь "length"). Открывающая
-    вставка (prio=0: вход ФО ИЛИ ветвь) ВСЕГДА должна идти СРАЗУ после '{',
-    закрывающая (prio=1: выход ФО) — СТРОГО на месте '}' тела (см. add_ins/
-    ins_col в main: открытие — ins_col как 0-based индекс ПОСЛЕ '{', закрытие
-    — close_col-1 как 0-based индекс САМОГО '}'). Если это не так — позиция
-    недостоверна (рассинхрон строки/колонки в данных CodeQL по неизвестной
-    пока причине), и лучше честно пропустить датчик (см. dropped_sids), чем
-    молча испортить синтаксис файла."""
-    if prio == 0:
-        return eff > 0 and ln[eff - 1] == "{"
-    return eff < len(ln) and ln[eff] == "}"
+    вставка с has_block=1 (prio=0: вход ФО ИЛИ ветвь if/for/while/do/try/
+    catch/else) ВСЕГДА должна идти СРАЗУ после '{', закрывающая (prio=1:
+    выход ФО) — СТРОГО на месте '}' тела (см. add_ins/ins_col в main:
+    открытие — ins_col как 0-based индекс ПОСЛЕ '{', закрытие — close_col-1
+    как 0-based индекс САМОГО '}'). has_block=2 (case/default метка switch)
+    — датчик ставится сразу после ':' без обёртки в {} (см. has_block=2 в
+    probe_points.ql и instrument_cpp.py: op "direct"), поэтому символьной
+    проверки тут нет — только границы строки (сам факт сдвига на ':'
+    проверяется геометрией CodeQL, символ перед позицией может быть любым,
+    включая пробел после ':'). has_block=0 (вход ФО) — символ перед позицией
+    либо '{' (обычное тело), либо ';' (явный super()/this() в конструкторе,
+    см. explicitCtorCall в probe_points.ql — вставка ставится сразу после
+    ЭТОГО оператора, который всегда заканчивается ';'). Если это не так —
+    позиция недостоверна (рассинхрон строки/колонки в данных CodeQL по
+    неизвестной пока причине), и лучше честно пропустить датчик (см.
+    dropped_sids), чем молча испортить синтаксис файла."""
+    if prio == 1:
+        return eff < len(ln) and ln[eff] == "}"
+    if has_block == 2:
+        return 0 <= eff <= len(ln)
+    if has_block == 0:
+        return eff > 0 and ln[eff - 1] in ("{", ";")
+    return eff > 0 and ln[eff - 1] == "{"
 
 
 def detect_package(files):
@@ -441,8 +456,10 @@ def main():
 
     # prio: при совпадении (строка, позиция) — вставка «перед }» (prio=1) идёт
     # раньше «после {» (prio=0). Нужно для пустых тел `{}`, где обе позиции совпадают.
-    def add_ins(fpath, line, eff_index, prio, text, sid):
-        ins.setdefault(fpath, []).append((line, eff_index, prio, text, sid)); touched.add(fpath)
+    # has_block передаётся в _insertion_is_valid: =2 (case/default) — без
+    # проверки символа '{' перед позицией (см. _insertion_is_valid).
+    def add_ins(fpath, line, eff_index, prio, text, sid, has_block=1):
+        ins.setdefault(fpath, []).append((line, eff_index, prio, text, sid, has_block)); touched.add(fpath)
 
     sid = 1
     for pt in pts:
@@ -459,7 +476,14 @@ def main():
             if pt["open_col"] <= 0 or pt["close_col"] <= 0:
                 skipped.append((fn, "entry", "нет позиции тела")); continue
             se, sx = sid, sid + 1; sid += 2
-            add_ins(fpath, pt["open_line"], pt["open_col"], 0, f" {ref}.hit({fo}, 0); try {{", se)
+            # has_block=0: вход ФО — открывающая вставка ставится либо сразу
+            # после '{' тела (обычный случай), либо сразу после super()/
+            # this() (явный вызов в конструкторе, см. explicitCtorCall в
+            # probe_points.ql) — там перед позицией ';', а не '{'. Оба случая
+            # легитимны для kind="entry", поэтому _insertion_is_valid
+            # принимает любой из двух символов (в отличие от has_block=1,
+            # где ветвь однозначно начинается строго после '{').
+            add_ins(fpath, pt["open_line"], pt["open_col"], 0, f" {ref}.hit({fo}, 0); try {{", se, has_block=0)
             add_ins(fpath, pt["close_line"], pt["close_col"] - 1, 1,
                     f"}} finally {{ {ref}.hit({fo}, -1); }} ", sx)
             sensor_map.append((se, fo, 0, base, pt["open_line"], "вход"))
@@ -471,14 +495,22 @@ def main():
             if pt["open_col"] <= 0:
                 skipped.append((fn, "branch", "нет позиции блока")); continue
             s = sid; sid += 1
-            add_ins(fpath, pt["open_line"], pt["open_col"], 0, f" {ref}.hit({fo}, {bn});", s)
+            if pt.get("has_block") == 2:
+                # case/default: ins_col из probe_points.ql — 1-based позиция
+                # символа ПОСЛЕ ':' (см. has_block=2 там же); -1 переводит её
+                # в 0-based индекс этого символа (мирроринг instrument_cpp.py,
+                # op "direct" — там тот же сдвиг col-1 по той же причине).
+                add_ins(fpath, pt["open_line"], pt["open_col"] - 1, 0,
+                        f" {ref}.hit({fo}, {bn});", s, has_block=2)
+            else:
+                add_ins(fpath, pt["open_line"], pt["open_col"], 0, f" {ref}.hit({fo}, {bn});", s)
             sensor_map.append((s, fo, bn, base, pt["open_line"], pt["btype"]))
 
     print(f"[4] Датчиков (потенциально): {sid - 1} (пропущено точек: {len(skipped)})")
 
     for fp in touched:
         lines = fp.read_text(encoding="utf-8", errors="ignore").splitlines(keepends=True)
-        for line, eff, prio, text, sid_ in sorted(ins[fp], key=lambda x: (x[0], x[1], x[2]), reverse=True):
+        for line, eff, prio, text, sid_, has_block in sorted(ins[fp], key=lambda x: (x[0], x[1], x[2]), reverse=True):
             idx = line - 1
             if idx < 0 or idx >= len(lines):
                 dropped_sids.add(sid_); continue
@@ -487,7 +519,7 @@ def main():
             elif ln.endswith("\n"): ln, nl = ln[:-1], "\n"
             if eff < 0 or eff > len(ln):
                 dropped_sids.add(sid_); continue
-            if not _insertion_is_valid(ln, eff, prio):
+            if not _insertion_is_valid(ln, eff, prio, has_block):
                 dropped_sids.add(sid_); continue
             lines[idx] = ln[:eff] + text + ln[eff:] + nl
         fp.write_text("".join(lines), encoding="utf-8")
