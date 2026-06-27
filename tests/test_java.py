@@ -41,13 +41,14 @@ def types_of(rows):
     return [r.get("Тип", "") for r in rows]
 
 
-TOTAL_BRANCHES = 42
+TOTAL_BRANCHES = 81
 # Сенсоры branch-типа в Карта_датчиков.csv = TOTAL_BRANCHES + catch-датчики
 # (catch делит № ветви с try, своей строки в Перечень_ветвей у него нет —
-# см. probe_points.ql и docs/PRINCIPLES_C_CPP.md). 8 catch — по числу
+# см. probe_points.ql и docs/PRINCIPLES_C_CPP.md). 10 catch — по числу
 # CatchClause во всём проекте (simpleTry:1, tryMultipleCatch:3, nestedTry:2,
-# tryWithLoop:1, BranchDemo.tryBranch:1; tryFinally — без catch, 0).
-TOTAL_CATCH_SENSORS = 8
+# tryWithLoop:1, BranchDemo.tryBranch:1, AdvancedDemo.safeDiv:1,
+# Pipeline.process:1; tryFinally — без catch, 0).
+TOTAL_CATCH_SENSORS = 10
 
 
 class TestBranchDetection:
@@ -100,6 +101,28 @@ class TestBranchDetection:
         negative_demo.cpp в test-project-cpp-branches)."""
         assert branches_of(java_branches_inventory, "sumRange") == []
         assert branches_of(java_branches_inventory, "signAndFlags") == []
+
+    def test_else_if_chain_each_if_is_own_branch(self, java_branches_inventory):
+        """Цепочка else-if (паритет с if_demo.cpp::else_if_chain): каждый
+        вложенный if в позиции else — самостоятельная ветвь со своим
+        номером, а не часть одной 'else'-записи родителя."""
+        rows = branches_of(java_branches_inventory, "elseIfChain")
+        assert types_of(rows) == ["if", "if", "if", "if"]
+        assert [r.get("№ ветви") for r in rows] == ["1", "2", "3", "4"]
+
+    def test_nested_if_without_else(self, java_branches_inventory):
+        """Вложенные if без else (паритет с if_demo.cpp::nested_if) —
+        внешний + два вложенных, без 'else'-записей."""
+        assert types_of(branches_of(java_branches_inventory, "nestedIf")) == ["if", "if", "if"]
+
+    def test_pipeline_call_routes(self, java_branches_inventory):
+        """Класс с маршрутами вызовов между методами (паритет с
+        pipeline.cpp): aboveThreshold/classify/normalize/process — каждый
+        со своим набором ветвей, независимо от вызовов друг друга."""
+        assert types_of(branches_of(java_branches_inventory, "aboveThreshold")) == ["if"]
+        assert types_of(branches_of(java_branches_inventory, "classify")) == ["for", "if"]
+        assert types_of(branches_of(java_branches_inventory, "normalize")) == ["while", "do"]
+        assert types_of(branches_of(java_branches_inventory, "process")) == ["try", "if", "if"]
 
 
 class TestSensorMap:
