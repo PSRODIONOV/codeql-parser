@@ -33,29 +33,72 @@ def _strip_comments(line: str) -> str:
 
 
 def read_source_snapshot(db_path):
-    """Индексирует исходники из src.zip внутри БД по базовому имени файла."""
-    result = {}
+    """Индексирует исходники из src.zip внутри БД — по ОТНОСИТЕЛЬНОМУ пути
+    (после вычитания общего префикса build-машины, см. detect_db_prefix) И
+    по basename (запасной вариант, см. _pick_snapshot ниже).
+
+    Баг (реальный проект, gosjava): индексация ТОЛЬКО по basename (как было
+    раньше) брала ПЕРВЫЙ попавшийся файл с данным именем и отдавала его для
+    ВСЕХ файлов с тем же именем в разных каталогах — напр. в src.zip были
+    ОДНОВРЕМЕННО org/omg/CORBA/StringSeqHelper.java и com/sun/corba/se/spi/
+    activation/RepositoryPackage/StringSeqHelper.java. filter_macro_
+    synthesized_fo сверял имя ФО (insert/extract/read) со строкой ЧУЖОГО
+    файла, не находил совпадения и ложно решал, что имя "собрано макросом",
+    теряя реальные ФО (см. ровно тот же класс багов и тот же приём фикса —
+    match_file_by_relpath в dynamic/instrument_java.py, история коллизии
+    basename на CharacterData.java)."""
+    from core.file_lists import detect_db_prefix
+    by_relpath, by_base = {}, {}
     src_zip = Path(db_path) / "src.zip"
     if not src_zip.exists():
-        return result
+        return {"by_relpath": by_relpath, "by_base": by_base, "prefix": ""}
+    try:
+        prefix = detect_db_prefix(str(src_zip))
+    except Exception:
+        prefix = ""
     try:
         with zipfile.ZipFile(src_zip) as z:
             for name in z.namelist():
                 if name.endswith("/"):
                     continue
-                base = name.replace("\\", "/").rsplit("/", 1)[-1]
-                if base in result:
-                    continue
+                norm = name.replace("\\", "/").lstrip("/")
+                rel = norm[len(prefix):] if prefix and norm.startswith(prefix) else norm
                 try:
-                    result[base] = z.read(name).decode("utf-8", errors="ignore").splitlines()
+                    lines = z.read(name).decode("utf-8", errors="ignore").splitlines()
                 except Exception:
                     continue
+                by_relpath[rel] = lines
+                by_base.setdefault(rel.rsplit("/", 1)[-1], []).append((rel, lines))
     except (zipfile.BadZipFile, OSError):
         pass
-    return result
+    return {"by_relpath": by_relpath, "by_base": by_base, "prefix": prefix}
 
 
-def filter_macro_synthesized_fo(func_data, source_by_base, log=None):
+def _pick_snapshot(snapshot, abs_path: str):
+    """Находит строки исходника по абсолютному пути ФО (build-машина).
+
+    Сначала — точное совпадение по относительному пути (после вычитания
+    того же prefix, что использовался при индексации — однозначно, без
+    риска коллизии basename). Если файл не нашёлся (напр. не входил в
+    охват --pattern при индексации) — запасной вариант по basename, но
+    ТОЛЬКО если ровно один кандидат действительно совпадает хвостом пути
+    (иначе вернуть None: лучше не проверять строку вообще, чем сверить её
+    со случайно подвернувшимся ОДНОИМЁННЫМ, но другим файлом)."""
+    if not snapshot or not abs_path:
+        return None
+    norm = abs_path.replace("\\", "/").lstrip("/")
+    prefix = snapshot.get("prefix", "")
+    rel = norm[len(prefix):] if prefix and norm.startswith(prefix) else norm
+    exact = snapshot.get("by_relpath", {}).get(rel)
+    if exact is not None:
+        return exact
+    base = rel.rsplit("/", 1)[-1]
+    cands = [lines for r, lines in snapshot.get("by_base", {}).get(base, [])
+              if rel.endswith(r) or r.endswith(rel)]
+    return cands[0] if len(cands) == 1 else None
+
+
+def filter_macro_synthesized_fo(func_data, snapshot, log=None):
     """Исключает ФО, чьё короткое имя (f.getName()) физически не встречается
     на указанной строке исходника — признак того, что имя целиком собрано
     макросом через ##-склейку токенов (X-macro вида macro(Name) ->
@@ -65,6 +108,10 @@ def filter_macro_synthesized_fo(func_data, source_by_base, log=None):
     X-macro CodeQL репортит позицию АРГУМЕНТА макроса (он литерален), а не
     итогового склеенного имени, поэтому isInMacroExpansion() там не
     срабатывает. Эта проверка — по факту, без знания механизма макроса.
+
+    ВАЖНО: применять ТОЛЬКО для cpp/c — у остальных языков нет ни
+    препроцессора, ни макросов (см. вызывающий код в core/project_runner.py
+    и main.py — там стоит условие по языку).
 
     log — необязательная функция логирования (см. _log в project_runner.py
     или просто print в main.py); вызывается с одним строковым аргументом.
@@ -83,8 +130,7 @@ def filter_macro_synthesized_fo(func_data, source_by_base, log=None):
         except (ValueError, TypeError):
             result.append(item)
             continue
-        base = path.replace("\\", "/").rsplit("/", 1)[-1]
-        lines = source_by_base.get(base)
+        lines = _pick_snapshot(snapshot, path)
         if not lines or not (1 <= line_no <= len(lines)):
             result.append(item)  # нет снэпшота строки — не можем проверить, не исключаем
             continue

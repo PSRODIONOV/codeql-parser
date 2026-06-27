@@ -206,10 +206,16 @@ def main():
     _log_action(start_time, "ОТЧЕТЫ", "Создан отчет", "Перечень файлов в сборке.csv")
 
     source_by_base = read_source_snapshot(args.db_path)
-    all_func_names = {it["qualified_name"] for it in func_data}
-    func_data = filter_macro_synthesized_fo(func_data, source_by_base, log=print)
-    kept_func_names = {it["qualified_name"] for it in func_data}
-    excluded_func_names = all_func_names - kept_func_names
+    # ТОЛЬКО для cpp/c — специфика препроцессора (X-macro/G_DEFINE_TYPE и
+    # подобные). У остальных языков нет макросов вообще — применять этот
+    # фильтр к ним означало ложно терять реальные ФО (см. тот же фикс и
+    # комментарий в core/project_runner.py::run_static_analysis).
+    excluded_func_names = set()
+    if args.language in ("cpp", "c"):
+        all_func_names = {it["qualified_name"] for it in func_data}
+        func_data = filter_macro_synthesized_fo(func_data, source_by_base, log=print)
+        kept_func_names = {it["qualified_name"] for it in func_data}
+        excluded_func_names = all_func_names - kept_func_names
     if excluded_func_names:
         info_data = filter_info_by_excluded_fo(info_data, excluded_func_names)
         # Также фильтруем data_data — связи из удалённых ФО

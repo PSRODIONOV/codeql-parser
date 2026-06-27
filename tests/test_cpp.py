@@ -156,6 +156,57 @@ class TestMacroFO:
         entry_fo_nums = {r.get("№ ФО") for r in cpp_branches_sensors if r.get("Запись (br)") == "0"}
         assert not (fo_nums & entry_fo_nums)
 
+    def test_macro_filter_resolves_basename_collision(self, tmp_path):
+        """Баг (реальный проект, gosjava — обнаружен на Java, но
+        read_source_snapshot/filter_macro_synthesized_fo общие для cpp/java):
+        src.zip может содержать ДВА файла с ОДИНАКОВЫМ basename в разных
+        каталогах (типично для генерируемого кода — напр. CORBA-генератор
+        кладёт одноимённые Helper.java в разные пакеты). Раньше
+        read_source_snapshot индексировал ТОЛЬКО по basename — первый
+        попавшийся файл с этим именем отдавался ДЛЯ ВСЕХ путей с тем же
+        именем. filter_macro_synthesized_fo сверял имя настоящего ФО со
+        строкой ЧУЖОГО (другого каталога) файла, не находил совпадения и
+        ложно решал, что имя "собрано макросом" — теряя реальную функцию.
+        Теперь индексация по относительному пути устраняет коллизию."""
+        import sys, zipfile
+        from pathlib import Path as _Path
+        sys.path.insert(0, str(_Path(__file__).parent.parent))
+        from core.fo_filters import read_source_snapshot, filter_macro_synthesized_fo
+
+        db_dir = tmp_path / "fake-db"
+        db_dir.mkdir()
+        with zipfile.ZipFile(db_dir / "src.zip", "w") as z:
+            # "Чужой" файл с тем же basename — другой каталог, другое тело:
+            # строка 3 здесь СОВСЕМ не похожа на реальный метод ниже.
+            z.writestr(
+                "tmp/build/proj/moduleA/Helper.cpp",
+                "namespace moduleA {\n"
+                "void unrelatedStuff() {\n"
+                "    int totallyDifferent = 0;\n"
+                "}\n"
+                "}\n",
+            )
+            # Реальный файл настоящего ФО — другой каталог, тот же basename.
+            z.writestr(
+                "tmp/build/proj/moduleB/Helper.cpp",
+                "namespace moduleB {\n"
+                "void realFunction() {\n"
+                "    int x = 1;\n"
+                "}\n"
+                "}\n",
+            )
+        snapshot = read_source_snapshot(str(db_dir))
+        func_data = [{
+            "qualified_name": "moduleB::realFunction",
+            "name": "realFunction",
+            "file": "/tmp/build/proj/moduleB/Helper.cpp",
+            "line": "2",
+        }]
+        out = filter_macro_synthesized_fo(func_data, snapshot, log=None)
+        assert len(out) == 1, (
+            "реальная функция НЕ должна быть исключена из-за коллизии basename "
+            "с одноимённым файлом в другом каталоге")
+
 
 # ── Карта датчиков ───────────────────────────────────────────────────────────
 

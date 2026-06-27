@@ -472,3 +472,53 @@ class TestInstrumentorRegressionBugs:
         }
         lang_probe = "/tmp/java_build.X/proj/jdk/src/share/classes/java/lang/CharacterData.java"
         assert match_file_by_relpath(lang_probe, prefix, by_relpath, by_base) is None
+
+    def test_macro_filter_resolves_basename_collision(self, tmp_path):
+        """Баг (реальный проект, gosjava): org.omg.CORBA.StringSeqHelper.java
+        и com/sun/corba/se/spi/activation/RepositoryPackage/StringSeqHelper.java
+        — ДВА файла с ОДИНАКОВЫМ basename StringSeqHelper.java в разных
+        каталогах src.zip. read_source_snapshot индексировал ТОЛЬКО по
+        basename — первый попавшийся файл отдавался ДЛЯ ОБОИХ путей.
+        filter_macro_synthesized_fo сверял имя настоящих методов (insert/
+        extract/read) со строкой ЧУЖОГО файла, не находил совпадения и
+        ложно решал, что имя "собрано макросом" — теряя реальные ФО (хотя
+        у Java вообще нет макросов; этот фильтр для Java теперь не
+        запускается вовсе, см. project_runner.py/main.py — но сам
+        read_source_snapshot/filter_macro_synthesized_fo общий с cpp/c,
+        и баг бил бы по cpp/c projects ровно так же при коллизии
+        basename, поэтому фиксится и проверяется независимо от языка)."""
+        import sys, zipfile
+        from pathlib import Path as _Path
+        sys.path.insert(0, str(_Path(__file__).parent.parent))
+        from core.fo_filters import read_source_snapshot, filter_macro_synthesized_fo
+
+        db_dir = tmp_path / "fake-db"
+        db_dir.mkdir()
+        with zipfile.ZipFile(db_dir / "src.zip", "w") as z:
+            # "Чужой" StringSeqHelper.java — другой пакет, другое тело.
+            z.writestr(
+                "tmp/build/proj/com/sun/corba/StringSeqHelper.java",
+                "package com.sun.corba;\n"
+                "class StringSeqHelper {\n"
+                "  static void unrelated() {}\n"
+                "}\n",
+            )
+            # Реальный StringSeqHelper.java — другой пакет, тот же basename.
+            z.writestr(
+                "tmp/build/proj/org/omg/CORBA/StringSeqHelper.java",
+                "package org.omg.CORBA;\n"
+                "abstract public class StringSeqHelper {\n"
+                "  public static void insert (org.omg.CORBA.Any a) {}\n"
+                "}\n",
+            )
+        snapshot = read_source_snapshot(str(db_dir))
+        func_data = [{
+            "qualified_name": "org.omg.CORBA.StringSeqHelper.insert",
+            "name": "insert",
+            "file": "/tmp/build/proj/org/omg/CORBA/StringSeqHelper.java",
+            "line": "3",
+        }]
+        out = filter_macro_synthesized_fo(func_data, snapshot, log=None)
+        assert len(out) == 1, (
+            "реальный метод insert НЕ должен быть исключён из-за коллизии "
+            "basename с одноимённым файлом в другом пакете")

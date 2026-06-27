@@ -427,9 +427,14 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
     # ФО, чьё короткое имя физически не встречается в исходной строке —
     # имя целиком собрано макросом (X-macro, G_DEFINE_TYPE и подобные) —
     # инструментировать их нельзя, исключаем из всех дальнейших отчётов.
-    # Только для cpp/c — специфика препроцессора. Раньше этот фильтр был
-    # только в main.py (CLI) и не применялся при запуске через GUI.
-    if language not in ("php", "sql") and raw.get("functional"):
+    # ТОЛЬКО для cpp/c — специфика препроцессора (комментарий это всегда
+    # утверждал, но условие ниже раньше реально включало ЛЮБОЙ язык кроме
+    # php/sql, в т.ч. java — у которой нет ни препроцессора, ни макросов;
+    # баг найден на gosjava: org.omg.CORBA.StringSeqHelper.insert/extract/
+    # read ложно считались "собранными макросом" из-за коллизии basename в
+    # read_source_snapshot, см. fo_filters.py — но сам факт применения
+    # фильтра к Java был отдельной, более фундаментальной ошибкой).
+    if language in ("cpp", "c") and raw.get("functional"):
         _macro_keys = ("functional", "info", "data", "flow", "signature")
         _t_macro = time.perf_counter()
         before_macro = {k: len(raw.get(k, [])) for k in _macro_keys}
