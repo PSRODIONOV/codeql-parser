@@ -218,27 +218,48 @@ def read_probe_points_from_db(project_db_path: str):
     return pts
 
 
+_SYNTHETIC_INIT_SUFFIXES = (".<clinit>", ".<obinit>")
+
+
 def dedupe_probe_points(pts, log=print):
     """Убирает точки вставки с ПОЛНОСТЬЮ совпадающей геометрией (kind/file/
-    open_line/open_col/close_line/close_col). CodeQL может вернуть НЕСКОЛЬКО
-    разных сущностей Callable/Stmt для ОДНОЙ физической точки исходника —
-    напр. generic-инстанцирование/raw-типы дают отдельные Method-сущности с
-    одинаковым телом и локацией, но разным func (qname зависит от того, через
-    какой generic-контекст CodeQL видит declaring type). Без дедупликации
-    КАЖДАЯ лишняя строка добавляет ЕЩЁ ОДНУ вставку в ТУ ЖЕ позицию — реальный
-    кейс на большом проекте: один try получал два finally (невалидный
-    синтаксис), сконцентрировано в java.io.* (BufferedReader,
-    BufferedInputStream, Bits — raw/generic-heavy классы JDK)."""
-    seen = set()
+    open_line/open_col/close_line/close_col).
+
+    Подтверждённый реальный кейс (gosjava-java, прогон probe_points.ql
+    напрямую против CodeQL-БД, 1628 дублей, все entry): класс БЕЗ единого
+    написанного в исходнике static{}/instance-блока (напр. только static
+    final поля-константы — компилятор сам генерирует байткод <clinit> без
+    единой строчки текста для него) — CodeQL всё равно синтезирует И
+    <clinit>, И <obinit>, и у ОБОИХ "тело" вырождено в позицию ПРЯМО ПОСЛЕ
+    открывающей скобки самого объявления класса (проверено по исходнику:
+    CharsetDecoder.java:137 — это `public abstract class CharsetDecoder {`,
+    а не какой-либо static/instance-блок). Ни один из них не присутствует в
+    исходнике в явном виде — такая коллизия молча отбрасывается, БЕЗ счёта
+    в "Дубликатов отброшено" (см. ниже): это не аномалия программы анализа,
+    а штатное расхождение модели CodeQL с тем, что реально написано.
+    Различить на уровне .ql-запроса синтетическую пару от настоящего явного
+    static{}-блока надёжно не вышло (см. историю фиксов) — getLocation() у
+    <clinit>/<obinit> в CodeQL почти всегда указывает на класс независимо от
+    того, есть явный блок или нет, так что фильтрация по этому критерию
+    задевала и реальные блоки в других классах проекта.
+
+    Любая ДРУГАЯ дублирующаяся геометрия (другой kind, либо не пара
+    <clinit>/<obinit>) — настоящая аномалия, считается и логируется, как и
+    раньше."""
+    seen = {}
     out = []
     dup = 0
     for pt in pts:
         key = (pt["kind"], pt["file"], pt["open_line"], pt["open_col"],
                pt["close_line"], pt["close_col"])
         if key in seen:
-            dup += 1
+            kept_func = seen[key]
+            if not (pt["kind"] == "entry"
+                     and pt["func"].endswith(_SYNTHETIC_INIT_SUFFIXES)
+                     and kept_func.endswith(_SYNTHETIC_INIT_SUFFIXES)):
+                dup += 1
             continue
-        seen.add(key)
+        seen[key] = pt["func"]
         out.append(pt)
     if dup and log:
         log(f"[3] Дубликатов геометрии точек вставки отброшено: {dup} "
@@ -654,8 +675,21 @@ def main():
         # комментарии, а javac без явной кодировки берёт платформную (cp1251 на
         # русской Windows) и падает "unmappable character for encoding Cp1251" —
         # сборка jar отваливалась бы НА ЛЮБОЙ такой машине независимо от проекта.
-        rj = subprocess.run([javac, "-encoding", "utf-8", "-d", str(jar_classes),
+        # --release 8: jar собирается бандл-JDK (часто свежий, напр. jdk25-win),
+        # а cqtrace-runtime.jar потом грузится JVM ИНСТРУМЕНТИРУЕМОГО проекта —
+        # она может быть Java 8 (как у gosjava-8u352). Class-файл, собранный без
+        # --release под более новый JDK, новее версии байткода, чем умеет старая
+        # JVM — UnsupportedClassVersionError при запуске. Сам Cqtrace.java не
+        # использует API новее Java 8 (см. Cqtrace.java.tmpl), так что --release 8
+        # ничего не ломает.
+        rj = subprocess.run([javac, "-encoding", "utf-8", "--release", "8",
+                            "-d", str(jar_classes),
                             str(jar_src / "Cqtrace.java")], capture_output=True, text=True)
+        if rj.returncode != 0 and "--release" in (rj.stderr or ""):
+            # javac < 9 не понимает --release (флаг появился в JDK 9) — откат
+            # на компиляцию дефолтным таргетом самого javac.
+            rj = subprocess.run([javac, "-encoding", "utf-8", "-d", str(jar_classes),
+                                str(jar_src / "Cqtrace.java")], capture_output=True, text=True)
         if rj.returncode == 0 and jar_tool:
             cqtrace_jar = out / "cqtrace-runtime.jar"
             # Повторная инструментация в ТОТ ЖЕ --out (без очистки workspace

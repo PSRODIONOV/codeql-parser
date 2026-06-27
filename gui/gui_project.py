@@ -309,6 +309,86 @@ def attach_funnel_table(log_widget, worker):
     worker.table.connect(on_table)
 
 
+# Шаги instrument_cpp.py/instrument_java.py печатают регулярные строки вида
+# "[N] текст" / "[5.1] текст" / "[extract] текст" (а также вспомогательные
+# строки без тега — warning/совет, отступом). Это subprocess (codeql.exe/
+# отдельный python), а не вызов внутри процесса GUI — честного table_cb
+# здесь нет, поэтому строим таблицу, парся уже идущий построчно stdout (без
+# изменений в самих instrument-скриптах).
+_PIPELINE_RE = re.compile(r"^\[([\w.]+)\]\s*(.*)$")
+
+
+def attach_pipeline_table(log_widget, worker):
+    """Таблица шагов инструментации: "Этап | Описание | Время". Каждая
+    строка stdout вида "[N] ..." становится отдельной строкой таблицы;
+    "Время" — интервал между соседними помеченными строками (между ними и
+    идёт реальная работа этого шага). Строки БЕЗ тега (warning/совет с
+    отступом, traceback) остаются обычным текстом под таблицей — ПОЛНОСТЬЮ
+    заменяет worker.log.connect(self.log.append) для подключённого worker'а."""
+    import time as _time
+
+    state = {"table": None, "row": 0, "last_ts": None, "timer": None, "frame": 0,
+             "plain_active": False}
+
+    def _stop_timer():
+        if state["timer"] is not None:
+            state["timer"].stop()
+            state["timer"] = None
+
+    def _tick():
+        table = state["table"]
+        if table is None or state["row"] == 0:
+            return
+        state["frame"] = (state["frame"] + 1) % len(_SPINNER)
+        _set_cell_text(table.cellAt(state["row"], 2), _SPINNER[state["frame"]])
+
+    def _ensure_table():
+        if state["table"] is not None:
+            return state["table"]
+        from PyQt5.QtGui import QTextCursor
+        cursor = _new_table_cursor(log_widget)
+        table = cursor.insertTable(1, 3, _table_format())
+        for c, name in enumerate(["Этап", "Описание", "Время"]):
+            _set_cell_text(table.cellAt(0, c), name)
+        cursor.movePosition(QTextCursor.End)
+        log_widget.setTextCursor(cursor)
+        state["table"] = table
+        timer = QTimer(log_widget)
+        timer.timeout.connect(_tick)
+        timer.start(120)
+        state["timer"] = timer
+        return table
+
+    def _finalize_last_row(now):
+        table = state["table"]
+        if table is not None and state["row"] > 0 and state["last_ts"] is not None:
+            _set_cell_text(table.cellAt(state["row"], 2), pr._dt(now - state["last_ts"]))
+
+    def on_log(text):
+        now = _time.perf_counter()
+        for line in text.splitlines() if text else []:
+            m = _PIPELINE_RE.match(line.strip())
+            if not m:
+                if line.strip():
+                    log_widget.append(line)
+                continue
+            table = _ensure_table()
+            _finalize_last_row(now)
+            table.appendRows(1)
+            state["row"] += 1
+            _set_cell_text(table.cellAt(state["row"], 0), m.group(1))
+            _set_cell_text(table.cellAt(state["row"], 1), m.group(2))
+            _set_cell_text(table.cellAt(state["row"], 2), _SPINNER[0])
+            state["last_ts"] = now
+
+    def on_done(ok, msg):
+        _finalize_last_row(_time.perf_counter())
+        _stop_timer()
+
+    worker.log.connect(on_log)
+    worker.done.connect(on_done)
+
+
 def _codeql() -> str:
     for c in (third_party("codeql-win", "codeql.exe"), third_party("codeql-linux", "codeql")):
         if c.exists():
@@ -1461,14 +1541,20 @@ class DynamicTab(QWidget):
             # русские буквы и символ «→» падают на cp1251-консоли Windows.
             env["PYTHONUTF8"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
-            p = subprocess.run(cmd, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", env=env)
-            emit(p.stdout[-4000:] if p.stdout else "")
+            # Стримим построчно (а не одним capture_output блоком в конце) —
+            # инструментация на крупном проекте идёт минуты, без стрима лог
+            # молчал бы всё это время; stderr слит в stdout, чтобы сохранить
+            # реальный порядок строк относительно друг друга.
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  text=True, encoding="utf-8", errors="replace",
+                                  env=env, bufsize=1)
+            for line in p.stdout:
+                emit(line.rstrip("\n"))
+            p.wait()
             if p.returncode != 0:
-                emit(p.stderr[-4000:] if p.stderr else "")
                 raise RuntimeError(f"exit {p.returncode}")
         self._worker = _Worker(task)
-        self._worker.log.connect(self.log.append)
+        attach_pipeline_table(self.log, self._worker)
         self._worker.done.connect(on_done)
         self._worker.start()
 

@@ -287,13 +287,13 @@ class TestInstrumentorRegressionBugs:
             assert not _is_bootstrap_path(p), f"{p}: НЕ должен быть исключён"
 
     def test_dedupe_probe_points_drops_identical_geometry(self):
-        """Баг (реальный проект, full-coverage JDK): CodeQL вернул несколько
-        Callable-сущностей (generic-инстанцирование/raw-типы) для ОДНОЙ
-        физической точки исходника — разный 'func', но идентичная позиция
-        вставки. Без дедупликации каждая лишняя строка добавляла ЕЩЁ ОДНУ
-        вставку в ту же позицию -> один try получал два finally (невалидный
-        синтаксис; 412 файлов/7600 дублей, сконцентрировано в java.io.*:
-        BufferedReader, BufferedInputStream, Bits)."""
+        """Общий случай: CodeQL вернул две разные Callable-сущности с
+        ПОЛНОСТЬЮ идентичной геометрией (вырожденный/непредвиденный кейс,
+        НЕ пара <clinit>/<obinit> — см. отдельный тест ниже про неё). Это
+        настоящая аномалия — без дедупликации лишняя строка добавляла бы
+        ЕЩЁ ОДНУ вставку в ту же позицию (напр. один try получал бы два
+        finally — невалидный синтаксис), и такой дубль должен СЧИТАТЬСЯ
+        (попадать в лог "Дубликатов отброшено")."""
         pts = [
             {"kind": "entry", "func": "a.B.m", "file": "B.java", "ref_line": 10,
              "open_line": 10, "open_col": 20, "close_line": 15, "close_col": 5, "btype": "-"},
@@ -302,9 +302,31 @@ class TestInstrumentorRegressionBugs:
             {"kind": "branch", "func": "a.B.m", "file": "B.java", "ref_line": 11,
              "open_line": 11, "open_col": 8, "close_line": 0, "close_col": 0, "btype": "if"},
         ]
-        out = dedupe_probe_points(pts, log=None)
+        logged = []
+        out = dedupe_probe_points(pts, log=logged.append)
         assert len(out) == 2, "дубликат с идентичной геометрией должен быть отброшен"
         assert sorted(o["kind"] for o in out) == ["branch", "entry"]
+        assert logged, "настоящая аномалия дублирования ДОЛЖНА попадать в лог"
+
+    def test_dedupe_probe_points_silently_drops_clinit_obinit_collision(self):
+        """Подтверждённый реальный кейс (gosjava-java, прогон probe_points.ql
+        напрямую против CodeQL-БД): класс БЕЗ единого написанного в исходнике
+        static{}/instance-блока (напр. только static final поля-константы)
+        получает синтетическую пару <clinit>+<obinit> с ОДНОЙ И ТОЙ ЖЕ
+        вырожденной геометрией (привязанной к открывающей скобке самого
+        класса, не к какому-либо блоку, 1628 таких пар на gosjava-java). Ни
+        один из них не присутствует в исходнике в явном виде — такой дубль
+        дропается МОЛЧА, не засоряя "Дубликатов отброшено" ложной тревогой."""
+        pts = [
+            {"kind": "entry", "func": "a.B.<clinit>", "file": "B.java", "ref_line": 10,
+             "open_line": 10, "open_col": 20, "close_line": 10, "close_col": 21, "btype": "-"},
+            {"kind": "entry", "func": "a.B.<obinit>", "file": "B.java", "ref_line": 10,
+             "open_line": 10, "open_col": 20, "close_line": 10, "close_col": 21, "btype": "-"},
+        ]
+        logged = []
+        out = dedupe_probe_points(pts, log=logged.append)
+        assert len(out) == 1, "одна из пары <clinit>/<obinit> должна быть отброшена"
+        assert not logged, "коллизия <clinit>/<obinit> НЕ должна попадать в лог"
 
     def test_jar_build_survives_stale_directory_at_target_path(self, tmp_path):
         """Баг (реальный проект, повторная инструментация в тот же --out без
