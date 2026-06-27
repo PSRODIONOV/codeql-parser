@@ -1454,7 +1454,7 @@ class DynamicTab(QWidget):
 
     # ── subprocess-обёртка в потоке ──────────────────────────────────────────
     def _run_subprocess(self, cmd, on_done):
-        def task(emit, prog=None):
+        def task(emit, prog=None, table_cb=None):
             env = dict(os.environ)
             env["_JAVA_OPTIONS"] = ""
             # Дочерний Python должен печатать/декодировать в UTF-8, иначе
