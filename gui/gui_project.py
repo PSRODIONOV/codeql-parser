@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QLineEdit, QComboBox, QSlider, QCheckBox, QGroupBox,
@@ -30,7 +30,10 @@ from PyQt5.QtWidgets import (
 )
 
 from gui import gui_styles
-from gui.gui_widgets import FileDropZone, set_locked, is_locked, enable_dragdrop_under_uac
+from gui.gui_widgets import (
+    FileDropZone, set_locked, is_locked, enable_dragdrop_under_uac,
+    install_disabled_tab_cursor,
+)
 from core.project_db import ProjectDB
 from core import project_runner as pr
 from paths import third_party, PROJECT_ROOT
@@ -86,14 +89,114 @@ def _bar_text(label: str, cur: int, total: int, width: int = 24) -> str:
     return f"{label} [{bar}] {cur}/{total} ({int(frac*100)}%)"
 
 
-def attach_progress(log_widget, worker):
-    """Подключает прогресс воркера к QTextEdit: строка прогресса обновляется
-    на месте (последняя строка перезаписывается), а не плодит новые строки."""
-    from PyQt5.QtGui import QTextCursor
+def _fixed_counter(cur: int, total: int) -> str:
+    """'тек/итог', право-выровненное в зарезервированной ширине
+    цифр(итог)*2+1 — чтобы счётчик не "прыгал" по мере роста cur (см.
+    обсуждение формата лога)."""
+    width = len(str(max(total, 1))) * 2 + 1
+    return f"{cur}/{total}".rjust(width)
 
-    state = {"active": False}
+
+def _bar_only(cur: int, total: int, width: int = 24) -> str:
+    """Полоса прогресса + фиксированный счётчик, без подписи — для вставки
+    внутрь ячейки таблицы (см. attach_progress, _DERIVED_LABELS)."""
+    if total <= 0:
+        return "…"
+    frac = max(0.0, min(1.0, cur / total))
+    filled = int(width * frac)
+    bar = "█" * filled + "░" * (width - filled)
+    return f"[{bar}] {_fixed_counter(cur, total)}"
+
+
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def _set_cell_text(cell, text: str):
+    """Заменяет содержимое ячейки QTextTable целиком (выделяет от начала до
+    конца ячейки и вставляет новый текст) — у QTextTableCell нет метода
+    "select all", это стандартный приём Qt для частичного обновления
+    готовой таблицы (не пересобирать всю таблицу/HTML на каждое изменение)."""
+    from PyQt5.QtGui import QTextCursor
+    start = cell.firstCursorPosition()
+    end = cell.lastCursorPosition()
+    start.setPosition(end.position(), QTextCursor.KeepAnchor)
+    start.insertText(text)
+
+
+def _new_table_cursor(log_widget):
+    """Курсор в конец лога, с переводом строки перед новой таблицей (если
+    лог не пуст) — общая подготовка перед insertTable для обеих таблиц."""
+    from PyQt5.QtGui import QTextCursor
+    cursor = log_widget.textCursor()
+    cursor.movePosition(QTextCursor.End)
+    if log_widget.toPlainText():
+        cursor.insertText("\n")
+    return cursor
+
+
+def _table_format():
+    from PyQt5.QtGui import QTextTableFormat
+    fmt = QTextTableFormat()
+    fmt.setCellPadding(4)
+    fmt.setCellSpacing(0)
+    fmt.setBorder(1)
+    return fmt
+
+
+# Метки progress(), которые рендерятся как прогресс-бар ВНУТРИ ячейки
+# Таблицы 2 ("Производные"), а не полнострочным текстом — см.
+# viz/flowchart_generator.py (БЛОК-СХЕМЫ/МАРШРУТЫ, фаза run_static_analysis)
+# и core/project_runner.py (Запись маршрутов/Выгрузка блок-схем, фаза
+# generate_static_reports — второй клик "Создать отчёты").
+_DERIVED_LABELS = [
+    "[БЛОК-СХЕМЫ] Генерация блок-схем (ФО)",
+    "[МАРШРУТЫ] Формирование маршрутов (ФО)",
+    "Запись маршрутов",
+    "Выгрузка блок-схем",
+]
+
+
+def attach_progress(log_widget, worker):
+    """Подключает прогресс воркера к QTextEdit. Известные label из
+    _DERIVED_LABELS рисуются прогресс-баром внутри ячейки Таблицы 2
+    (создаётся лениво при первом таком label); остальные — старым способом,
+    одной строкой, перезаписываемой на месте (см. _bar_text)."""
+    from PyQt5.QtGui import QTextCursor
+    import time as _time
+
+    state = {"active": False, "derived_table": None, "row_of": {}, "start_time": {}}
+
+    def _ensure_derived_table():
+        if state["derived_table"] is not None:
+            return state["derived_table"]
+        cursor = _new_table_cursor(log_widget)
+        table = cursor.insertTable(len(_DERIVED_LABELS) + 1, 3, _table_format())
+        for c, name in enumerate(["Производные", "Прогресс", "Время"]):
+            _set_cell_text(table.cellAt(0, c), name)
+        row_of = {}
+        for i, label in enumerate(_DERIVED_LABELS, start=1):
+            _set_cell_text(table.cellAt(i, 0), label)
+            _set_cell_text(table.cellAt(i, 1), "—")
+            _set_cell_text(table.cellAt(i, 2), "—")
+            row_of[label] = i
+        cursor.movePosition(QTextCursor.End)
+        log_widget.setTextCursor(cursor)
+        state["derived_table"] = table
+        state["row_of"] = row_of
+        return table
 
     def on_progress(label, cur, total):
+        if label in _DERIVED_LABELS:
+            table = _ensure_derived_table()
+            row = state["row_of"][label]
+            state["start_time"].setdefault(label, _time.perf_counter())
+            if total > 0 and cur >= total:
+                elapsed = _time.perf_counter() - state["start_time"][label]
+                _set_cell_text(table.cellAt(row, 1), str(cur))
+                _set_cell_text(table.cellAt(row, 2), pr._dt(elapsed))
+            else:
+                _set_cell_text(table.cellAt(row, 1), _bar_only(cur, total))
+            return
         text = _bar_text(label, cur, total)
         cursor = log_widget.textCursor()
         cursor.movePosition(QTextCursor.End)
@@ -114,6 +217,96 @@ def attach_progress(log_widget, worker):
 
     worker.progress.connect(on_progress)
     worker.log.connect(on_log)
+
+
+# Столбцы Таблицы 1 ("воронка" по запросам/фильтрам) и шаги фильтрации,
+# которым они соответствуют (см. core/project_runner.py::_table — события
+# query_batch_start/query_batch_done/filter_step).
+_FUNNEL_COLS = ["Сущность", "Запрошено", "Вне списка", "Макро-фильтр", "Итог", "Время"]
+_FUNNEL_STEP_COL = {"вне списка": 2, "макро-фильтр": 3}
+
+
+def attach_funnel_table(log_widget, worker):
+    """Подключает Таблицу 1 (воронка ФО/ИО/файлы/матрицы/анализ/поток/
+    датчики). Рисуется целиком на "query_batch_start" (все ячейки "—"),
+    столбец "Запрошено" крутит ОБЩИЙ спиннер на всех строках сразу (см.
+    обсуждение формата: codeql выполняет все запросы ОДНИМ блокирующим
+    вызовом — честного покадрового прогресса по отдельным запросам нет),
+    "query_batch_done" останавливает спиннер и заполняет числа. Шаги
+    "вне списка"/"макро-фильтр" заполняют только строки, упомянутые в
+    payload — остальные остаются "—" (см. план: control/arg_flow/file_flow/
+    files не трогаются макро-фильтром, это архитектурно корректно)."""
+    state = {"table": None, "row_of": {}, "timer": None, "frame": 0}
+
+    def _stop_timer():
+        if state["timer"] is not None:
+            state["timer"].stop()
+            state["timer"] = None
+
+    def _tick():
+        state["frame"] = (state["frame"] + 1) % len(_SPINNER)
+        glyph = _SPINNER[state["frame"]]
+        table = state["table"]
+        if table is None:
+            return
+        for row in state["row_of"].values():
+            _set_cell_text(table.cellAt(row, 1), glyph)
+
+    def on_table(event, payload):
+        if event == "query_batch_start":
+            from PyQt5.QtGui import QTextCursor
+            rows = payload["rows"]  # [(key, (tag, label)), ...]
+            cursor = _new_table_cursor(log_widget)
+            table = cursor.insertTable(len(rows) + 1, len(_FUNNEL_COLS), _table_format())
+            for c, name in enumerate(_FUNNEL_COLS):
+                _set_cell_text(table.cellAt(0, c), name)
+            row_of = {}
+            for i, (key, (tag, label)) in enumerate(rows, start=1):
+                _set_cell_text(table.cellAt(i, 0), f"[{tag}] {label}")
+                for c in range(1, len(_FUNNEL_COLS)):
+                    _set_cell_text(table.cellAt(i, c), "—")
+                row_of[key] = i
+            cursor.movePosition(QTextCursor.End)
+            log_widget.setTextCursor(cursor)
+            state["table"] = table
+            state["row_of"] = row_of
+            _stop_timer()
+            timer = QTimer(log_widget)
+            timer.timeout.connect(_tick)
+            timer.start(120)
+            state["timer"] = timer
+
+        elif event == "query_batch_done":
+            _stop_timer()
+            table = state["table"]
+            if table is None:
+                return
+            elapsed = pr._dt(payload.get("elapsed", 0.0))
+            for key, count in payload["counts"].items():
+                row = state["row_of"].get(key)
+                if row is None:
+                    continue
+                _set_cell_text(table.cellAt(row, 1), str(count))
+                _set_cell_text(table.cellAt(row, 5), elapsed)
+
+        elif event == "filter_step":
+            table = state["table"]
+            if table is None:
+                return
+            col = _FUNNEL_STEP_COL.get(payload.get("step", ""))
+            if col is None:
+                return
+            before, after = payload["before"], payload["after"]
+            for key, a in after.items():
+                row = state["row_of"].get(key)
+                if row is None:
+                    continue
+                b = before.get(key, a)
+                delta = a - b
+                _set_cell_text(table.cellAt(row, col), f"{delta:+d}" if delta else "0")
+                _set_cell_text(table.cellAt(row, 4), str(a))
+
+    worker.table.connect(on_table)
 
 
 def _codeql() -> str:
@@ -165,6 +358,7 @@ def remove_recent(db_path: str):
 class _Worker(QThread):
     log = pyqtSignal(str)
     progress = pyqtSignal(str, int, int)  # label, current, total
+    table = pyqtSignal(str, dict)         # событие воронки (см. attach_funnel_table)
     done = pyqtSignal(bool, str)          # success, message
 
     def __init__(self, fn):
@@ -173,7 +367,7 @@ class _Worker(QThread):
 
     def run(self):
         try:
-            self._fn(self.log.emit, self.progress.emit)  # task(emit, prog)
+            self._fn(self.log.emit, self.progress.emit, self.table.emit)  # task(emit, prog, table_cb)
             self.done.emit(True, "OK")
         except Exception as e:
             import traceback
@@ -556,7 +750,7 @@ class StaticTab(QWidget):
         renderer = self.renderer_combo.currentData()
         simplified = self.simplified_cb.isChecked()
         sql_dialect = self.dialect_combo.currentData() if lang == "sql" else "mysql"
-        def task(emit, prog=None):
+        def task(emit, prog=None, table_cb=None):
             # Те же строки передаём и как шаблоны (glob/подстрока), и как
             # точный/относительный список путей (см. core/file_lists.py) —
             # строки без '*'/'?' (типичные пути файлов, напр. загруженные
@@ -572,11 +766,12 @@ class StaticTab(QWidget):
                                    simplified_flowcharts=simplified,
                                    include_patterns=include, exclude_patterns=exclude,
                                    include_list=include, exclude_list=exclude,
-                                   log=emit, progress=prog)
+                                   log=emit, progress=prog, table_cb=table_cb)
 
         self._worker = _Worker(task)
         self._worker.log.connect(self.log.append)
         attach_progress(self.log, self._worker)
+        attach_funnel_table(self.log, self._worker)
         self._worker.done.connect(self._analysis_done)
         self._worker.start()
 
@@ -625,7 +820,7 @@ class StaticTab(QWidget):
         self.log.append("⏳ Создание отчётов из базы…")
         crit_path = self.critical_io_edit.text().strip() or None
 
-        def task(emit, prog=None):
+        def task(emit, prog=None, table_cb=None):
             pr.generate_static_reports(self.proj, log=emit, progress=prog,
                                        critical_io_path=crit_path)
 
@@ -1309,6 +1504,7 @@ class ProjectWindow(QMainWindow):
         self.tabs.addTab(self.static_tab, "Статический анализ")
         self.tabs.addTab(self.dynamic_tab, "Динамический анализ")
         lay.addWidget(self.tabs)
+        install_disabled_tab_cursor(self.tabs)
 
         self.refresh_stats()
         self.refresh_dynamic_tab_state()

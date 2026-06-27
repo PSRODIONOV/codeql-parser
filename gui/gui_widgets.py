@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QEvent, QObject, pyqtSignal
 from PyQt5.QtWidgets import QFrame, QLabel, QVBoxLayout, QFileDialog
 
 
@@ -189,3 +189,38 @@ def set_locked(widget, locked: bool, reason: str = ""):
 
 def is_locked(widget) -> bool:
     return bool(widget.property("locked"))
+
+
+class _DisabledTabCursorFilter(QObject):
+    """eventFilter для QTabBar: курсор-запрет при наведении на ЗАБЛОКИРОВАННУЮ
+    вкладку (setTabEnabled(idx, False)). В отличие от set_locked() выше,
+    здесь нельзя просто setCursor() на саму вкладку — disabled-индекс не
+    получает событий мыши, но сам QTabBar остаётся активным виджетом и
+    диспетчеризует tabAt(pos) даже для disabled-вкладок, поэтому курсор
+    ставится на бар целиком, в зависимости от того, какая вкладка под ним."""
+
+    def __init__(self, tab_widget):
+        super().__init__(tab_widget.tabBar())
+        self._tabs = tab_widget
+        self._bar = tab_widget.tabBar()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseMove:
+            idx = self._bar.tabAt(event.pos())
+            forbidden = idx >= 0 and not self._tabs.isTabEnabled(idx)
+            self._bar.setCursor(Qt.ForbiddenCursor if forbidden else Qt.ArrowCursor)
+        elif event.type() == QEvent.Leave:
+            self._bar.setCursor(Qt.ArrowCursor)
+        return False
+
+
+def install_disabled_tab_cursor(tab_widget):
+    """Подключает курсор-запрет (Qt.ForbiddenCursor) при наведении на
+    отключённую вкладку QTabWidget — паритет с set_locked() для кнопок:
+    вкладка остаётся видимой и недоступной, но курсор сразу подсказывает,
+    что клик ничего не даст (вместе с уже существующим setTabToolTip)."""
+    bar = tab_widget.tabBar()
+    bar.setMouseTracking(True)
+    f = _DisabledTabCursorFilter(tab_widget)
+    bar.installEventFilter(f)
+    tab_widget._disabled_tab_cursor_filter = f  # держим ссылку — иначе GC соберёт фильтр

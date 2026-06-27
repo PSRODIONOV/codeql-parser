@@ -71,6 +71,15 @@ def _progress(cb: Optional[Callable], label: str, cur: int, total: int):
         cb(label, cur, total)
 
 
+def _table(cb: Optional[Callable], event: str, payload: dict):
+    """Структурированное событие для табличного лога GUI (воронка по
+    запросам/фильтрам) — необязательный канал ОТДЕЛЬНЫЙ от log()/progress(),
+    чтобы не трогать сигнатуры/поведение для CLI и тестов (cb по умолчанию
+    None). См. attach_funnel_table в gui/gui_project.py."""
+    if cb:
+        cb(event, payload)
+
+
 
 
 class FileFilterResult:
@@ -85,12 +94,17 @@ class FileFilterResult:
         self.excess_exclude = excess_exclude
 
 
+_FILTER_KEYS = ("functional", "info", "files", "signature", "control",
+                "data", "arg_flow", "file_flow", "flow")
+
+
 def apply_file_filters(raw: Dict[str, List[dict]],
                        include: Optional[List[str]],
                        exclude: Optional[List[str]],
                        log: Optional[Callable] = None,
                        include_list: Optional[List[str]] = None,
-                       exclude_list: Optional[List[str]] = None) -> "FileFilterResult":
+                       exclude_list: Optional[List[str]] = None,
+                       table_cb: Optional[Callable] = None) -> "FileFilterResult":
     """Фильтрует сырые наборы по белому/чёрному спискам шаблонов путей
     (include/exclude — glob/подстрока) И/ИЛИ по явному списку файлов
     (include_list/exclude_list — точные ИЛИ относительные пути, см.
@@ -119,13 +133,18 @@ def apply_file_filters(raw: Dict[str, List[dict]],
     что реально попало в БД). Эти списки нужно сохранить в отчётах
     проекта — см. вызывающий код в run_static_analysis.
     """
+    import time
     from core.file_lists import path_matches_list, is_generated_path
 
+    t0 = time.perf_counter()
     include = [p for p in (include or []) if p.strip()]
     exclude = [p for p in (exclude or []) if p.strip()]
     include_list = [p for p in (include_list or []) if p.strip()]
     exclude_list = [p for p in (exclude_list or []) if p.strip()]
     if not include and not exclude and not include_list and not exclude_list:
+        no_change = {k: len(raw.get(k, [])) for k in _FILTER_KEYS}
+        _table(table_cb, "filter_step", {"step": "вне списка", "before": no_change,
+                                         "after": no_change, "elapsed": time.perf_counter() - t0})
         return FileFilterResult(raw, [], [])
 
     def file_ok(path: str) -> bool:
@@ -175,7 +194,8 @@ def apply_file_filters(raw: Dict[str, List[dict]],
                   f"могут быть проанализированы/инструментированы, если включить их "
                   f"в белый список.")
 
-    before_fo = len(raw.get("functional", []))
+    before = {k: len(raw.get(k, [])) for k in _FILTER_KEYS}
+
     raw["functional"] = [r for r in raw["functional"] if file_ok(r.get("file", ""))]
     allowed = {r["qualified_name"] for r in raw["functional"]}
 
@@ -193,9 +213,13 @@ def apply_file_filters(raw: Dict[str, List[dict]],
                         if r.get("function_name") in allowed]
     raw["flow"] = [r for r in raw.get("flow", []) if r.get("func_name") in allowed]
 
+    after = {k: len(raw.get(k, [])) for k in _FILTER_KEYS}
+    _table(table_cb, "filter_step", {"step": "вне списка", "before": before,
+                                     "after": after, "elapsed": time.perf_counter() - t0})
+
     # Только cp1251-безопасные символы: лог может печататься в консоль Windows
     # (cp1251/cp866), где «→» и эмодзи роняют прогон UnicodeEncodeError.
-    _log(log, f"[ФИЛЬТР] ФО: {before_fo} -> {len(raw['functional'])} "
+    _log(log, f"[ФИЛЬТР] ФО: {before['functional']} -> {after['functional']} "
               f"(белый список шаблонов: {len(include)}, чёрный: {len(exclude)}; "
               f"белый список файлов: {len(include_list)}, чёрный: {len(exclude_list)})")
     return FileFilterResult(raw, excess_include, excess_exclude)
@@ -217,8 +241,14 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
                         include_list: Optional[List[str]] = None,
                         exclude_list: Optional[List[str]] = None,
                         log: Optional[Callable] = None,
-                        progress: Optional[Callable] = None) -> Dict[str, int]:
+                        progress: Optional[Callable] = None,
+                        table_cb: Optional[Callable] = None) -> Dict[str, int]:
     """Выполняет анализ и сохраняет сырые + производные данные в project.db.
+
+    table_cb(event, payload) — необязательный канал структурированных
+    событий "воронки" (запрос -> фильтры -> итог) для табличного лога GUI
+    (см. attach_funnel_table в gui/gui_project.py). CLI/тесты его не
+    передают (None) — поведение/вывод log()/progress() не меняется.
 
     include_list/exclude_list — белый/чёрный список файлов (см.
     core/file_lists.py): пути, по одному на список, относительные или
@@ -362,9 +392,14 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
 
     _engine = "Joern" if language == "php" else "CodeQL"
     _log(log, f"[ЗАПРОСЫ] Запуск {len(_needed)} {_engine}-запросов (одна загрузка БД)...")
+    _table(table_cb, "query_batch_start",
+          {"rows": [(k, _LABELS.get(k, (k.upper(), k))) for k in _needed]})
     _ts = time.perf_counter()
     _batch = analyzer.run_batch_queries(_needed, log=_on_query_done)
-    _log(log, f"[ЗАПРОСЫ] Готово за {_dt(time.perf_counter() - _ts)}")
+    _batch_elapsed = time.perf_counter() - _ts
+    _table(table_cb, "query_batch_done",
+          {"counts": {k: len(_batch.get(k, [])) for k in _needed}, "elapsed": _batch_elapsed})
+    _log(log, f"[ЗАПРОСЫ] Готово за {_dt(_batch_elapsed)}")
 
     raw: Dict[str, List[dict]] = {}
     for _k in _needed:
@@ -375,7 +410,8 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
 
     # Фильтрация по белому/чёрному спискам шаблонов И/ИЛИ явных списков файлов
     _filter_res = apply_file_filters(raw, include_patterns, exclude_patterns, log,
-                                     include_list=include_list, exclude_list=exclude_list)
+                                     include_list=include_list, exclude_list=exclude_list,
+                                     table_cb=table_cb)
     if _filter_res.excess_include or _filter_res.excess_exclude:
         project.reports_static.mkdir(parents=True, exist_ok=True)
         _excess_path = project.reports_static / "Избыточные_записи_списка.csv"
@@ -394,7 +430,10 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
     # Только для cpp/c — специфика препроцессора. Раньше этот фильтр был
     # только в main.py (CLI) и не применялся при запуске через GUI.
     if language not in ("php", "sql") and raw.get("functional"):
-        before_fo = len(raw["functional"])
+        _macro_keys = ("functional", "info", "data", "flow", "signature")
+        _t_macro = time.perf_counter()
+        before_macro = {k: len(raw.get(k, [])) for k in _macro_keys}
+        before_fo = before_macro["functional"]
         before_names = {r["qualified_name"] for r in raw["functional"]}
         source_by_base = read_source_snapshot(meta["codeql_db_path"])
         raw["functional"] = filter_macro_synthesized_fo(raw["functional"], source_by_base, log=log)
@@ -415,6 +454,10 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
                                     if r.get("function_name", "") not in excluded_names]
                 _log(log, f"[ФИЛЬТР] ИО/ветви/ПОК: исключены данные из "
                     f"{len(excluded_names)} макро-ФО")
+        after_macro = {k: len(raw.get(k, [])) for k in _macro_keys}
+        _table(table_cb, "filter_step", {"step": "макро-фильтр", "before": before_macro,
+                                         "after": after_macro,
+                                         "elapsed": time.perf_counter() - _t_macro})
 
     ts = time.perf_counter()
     project.save_raw_data(raw)
