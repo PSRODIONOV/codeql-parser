@@ -289,6 +289,53 @@ def detect_package(files):
     return c.most_common(1)[0][0] if c else ""
 
 
+def match_file_by_base(probe_path: str, by_base: dict):
+    """Сопоставляет абсолютный путь probe (build-машина) извлечённому файлу
+    по СОВПАДЕНИЮ ХВОСТА пути, а не только по basename. by_base — индекс
+    basename -> [(relpath_к_out, Path), ...] (см. main()).
+
+    Баг (реальный проект, gosjava): java/lang/CharacterData.java
+    (bootstrap-исключён из охвата, см. _is_bootstrap_path) и
+    org/w3c/dom/CharacterData.java (обычный, входит в охват) — РАЗНЫЕ файлы
+    с ОДИНАКОВЫМ basename. Старый код при единственном кандидате по
+    basename возвращал его БЕЗ проверки пути — геометрия первого
+    (исключённого) файла применялась к случайному совпадению по имени
+    (второму, физически не связанному файлу), портя его на произвольных
+    байтовых позициях (внутрь javadoc, внутрь идентификаторов). Теперь
+    endswith-проверка обязательна ВСЕГДА, даже для единственного кандидата —
+    иначе вместо порчи чужого файла датчик просто не находит позицию (см.
+    add_ins в main(): fpath is None -> точка пропускается)."""
+    pp = probe_path.replace("\\", "/")
+    cands = by_base.get(pp.rsplit("/", 1)[-1], [])
+    best = None
+    for rel, p in cands:
+        if pp.endswith("/" + rel) and (best is None or len(rel) > len(best[0])):
+            best = (rel, p)
+    return best[1] if best else None
+
+
+def match_file_by_relpath(probe_path: str, prefix: str, by_relpath: dict, by_base: dict):
+    """Сопоставляет probe-путь файлу УСТРАНЯЯ САМУ ПРИЧИНУ коллизии по
+    basename (см. match_file_by_base), а не только её симптом: probe_path —
+    абсолютный путь build-машины, prefix — тот же общий префикс, который
+    extract_project_sources() (core/file_lists.py::detect_db_prefix) обрезал
+    при извлечении в --out, поэтому probe_path с обрезанным prefix даёт
+    РОВНО ТОТ ЖЕ относительный путь, что и реальный файл на диске — точное
+    совпадение по словарю {relpath: Path}, без эвристик и без риска, что
+    два разных файла с одинаковым именем (java/lang/CharacterData.java —
+    bootstrap-исключён, и org/w3c/dom/CharacterData.java — обычный) будут
+    спутаны. Если точного совпадения нет (probe ссылается на файл, который
+    не был извлечён вообще — напр. bootstrap-исключённый, или иной фильтр)
+    — откатывается на basename+endswith (match_file_by_base) для
+    устойчивости к редким расхождениям нормализации путей."""
+    norm = probe_path.replace("\\", "/").lstrip("/")
+    rel = norm[len(prefix):] if prefix and norm.startswith(prefix) else norm
+    exact = by_relpath.get(rel)
+    if exact is not None:
+        return exact
+    return match_file_by_base(probe_path, by_base)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", required=True)
@@ -434,22 +481,21 @@ def main():
           f"(+ import {pkg}.Cqtrace; в каждый инструментированный файл)" if pkg
           else f"    Пакет Cqtrace: (default) → ссылка {ref}.hit(...)")
 
-    # Индекс по basename → [(relpath, Path)] для сопоставления по относительному пути.
+    # Индекс по basename → [(relpath, Path)] — фоллбэк-эвристика
+    # (match_file_by_base), и точный индекс по relpath (тот же prefix, что
+    # extract_project_sources обрезал при извлечении) — основной путь
+    # сопоставления, см. match_file_by_relpath.
     from collections import defaultdict
     by_base = defaultdict(list)
+    by_relpath = {}
     for p in all_java:
-        by_base[p.name].append((p.relative_to(out).as_posix(), p))
+        rel = p.relative_to(out).as_posix()
+        by_base[p.name].append((rel, p))
+        by_relpath[rel] = p
+    _extract_prefix = extract_res.get("prefix", "")
 
     def match_file(probe_path):
-        pp = probe_path.replace("\\", "/")
-        cands = by_base.get(pp.rsplit("/", 1)[-1], [])
-        if len(cands) == 1:
-            return cands[0][1]
-        best = None
-        for rel, p in cands:
-            if pp.endswith("/" + rel) and (best is None or len(rel) > len(best[0])):
-                best = (rel, p)
-        return best[1] if best else None
+        return match_file_by_relpath(probe_path, _extract_prefix, by_relpath, by_base)
 
     ins = {}; sensor_map = []; skipped = []; touched = set()
     dropped_sids = set()

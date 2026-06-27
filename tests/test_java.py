@@ -26,7 +26,10 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "dynamic"))
-from instrument_java import _is_bootstrap_path, dedupe_probe_points, _insertion_is_valid  # noqa: E402
+from instrument_java import (  # noqa: E402
+    _is_bootstrap_path, dedupe_probe_points, _insertion_is_valid,
+    match_file_by_base, match_file_by_relpath,
+)
 
 
 def _short(fo: str) -> str:
@@ -358,3 +361,80 @@ class TestInstrumentorRegressionBugs:
         # Контрольный пример валидного закрытия: позиция указывает на '}'.
         closer = "    }"
         assert _insertion_is_valid(closer, closer.index("}"), prio=1)
+
+    def test_match_file_rejects_basename_collision_with_excluded_file(self):
+        """Баг (реальный проект, gosjava): java/lang/CharacterData.java
+        (bootstrap-исключён из охвата извлечения, см. _is_bootstrap_path) и
+        org/w3c/dom/CharacterData.java (обычный файл, входит в охват) — РАЗНЫЕ
+        файлы с ОДИНАКОВЫМ basename. Старый match_file() при единственном
+        кандидате по basename возвращал его БЕЗ проверки совпадения хвоста
+        пути — геометрия первого (физически отсутствующего в --out из-за
+        исключения) файла применялась ко второму, случайно подвернувшемуся по
+        имени, и портила его на произвольных байтовых позициях (внутрь
+        javadoc, внутрь идентификаторов вида "setData" -> "setD<датчик>ata").
+        Теперь при единственном кандидате тоже обязательна проверка хвоста —
+        несовпадение должно возвращать None (точка пропускается), а не
+        чужой файл."""
+        by_base = {
+            "CharacterData.java": [
+                ("proj/jaxp/src/org/w3c/dom/CharacterData.java", Path("/out/proj/jaxp/src/org/w3c/dom/CharacterData.java")),
+            ],
+        }
+        # java/lang/CharacterData.java исключён из --out (bootstrap), его
+        # реального кандидата в by_base нет — единственный кандидат по
+        # basename физически НЕ относится к этому пути.
+        probe_path = "/tmp/java_build.X/proj/jdk/src/share/classes/java/lang/CharacterData.java"
+        assert match_file_by_base(probe_path, by_base) is None
+
+        # Контрольный пример: путь действительно совпадает хвостом —
+        # единственный кандидат должен находиться, как и раньше.
+        real_path = "/tmp/java_build.X/proj/jaxp/src/org/w3c/dom/CharacterData.java"
+        assert match_file_by_base(real_path, by_base) == Path(
+            "/out/proj/jaxp/src/org/w3c/dom/CharacterData.java")
+
+    def test_match_file_by_relpath_resolves_basename_collision_directly(self):
+        """Устраняет САМУ ПРИЧИНУ коллизии (а не только её симптом, как
+        match_file_by_base): при ТОЧНОМ совпадении relative-path (тот же
+        prefix, что extract_project_sources обрезал при извлечении, см.
+        core/file_lists.py::detect_db_prefix) однозначно находится нужный
+        файл, даже если basename совпадает с другим, физически НЕ связанным
+        файлом — никакой эвристики "единственный кандидат" вообще не
+        требуется, коллизия по имени не возникает в принципе."""
+        prefix = "tmp/java_build.X/"
+        by_relpath = {
+            "proj/jaxp/src/org/w3c/dom/CharacterData.java":
+                Path("/out/proj/jaxp/src/org/w3c/dom/CharacterData.java"),
+            "proj/jdk/src/share/classes/java/lang/CharacterData.java":
+                Path("/out/proj/jdk/src/share/classes/java/lang/CharacterData.java"),
+        }
+        by_base = {
+            "CharacterData.java": [
+                (k, v) for k, v in by_relpath.items()
+            ],
+        }
+        dom_probe = "/tmp/java_build.X/proj/jaxp/src/org/w3c/dom/CharacterData.java"
+        lang_probe = "/tmp/java_build.X/proj/jdk/src/share/classes/java/lang/CharacterData.java"
+        assert match_file_by_relpath(dom_probe, prefix, by_relpath, by_base) == Path(
+            "/out/proj/jaxp/src/org/w3c/dom/CharacterData.java")
+        assert match_file_by_relpath(lang_probe, prefix, by_relpath, by_base) == Path(
+            "/out/proj/jdk/src/share/classes/java/lang/CharacterData.java")
+
+    def test_match_file_by_relpath_falls_back_when_file_not_extracted(self):
+        """java/lang/CharacterData.java bootstrap-исключён — в by_relpath его
+        нет вовсе (физически не извлекался). Точное совпадение не находит
+        ничего -> откат на match_file_by_base, который (после фикса) тоже
+        корректно возвращает None, а не чужой org/w3c/dom/CharacterData.java
+        (воспроизводит реальный кейс gosjava целиком, через прод-функцию)."""
+        prefix = "tmp/java_build.X/"
+        by_relpath = {
+            "proj/jaxp/src/org/w3c/dom/CharacterData.java":
+                Path("/out/proj/jaxp/src/org/w3c/dom/CharacterData.java"),
+        }
+        by_base = {
+            "CharacterData.java": [
+                ("proj/jaxp/src/org/w3c/dom/CharacterData.java",
+                 Path("/out/proj/jaxp/src/org/w3c/dom/CharacterData.java")),
+            ],
+        }
+        lang_probe = "/tmp/java_build.X/proj/jdk/src/share/classes/java/lang/CharacterData.java"
+        assert match_file_by_relpath(lang_probe, prefix, by_relpath, by_base) is None
