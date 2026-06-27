@@ -65,42 +65,6 @@ def _find_jdk_tool(tool: str):
             continue
     return None
 
-# Пакеты раннего bootstrap JVM: на старте (System.initializeSystemClass и
-# раньше) методы этих классов исполняются ДО того, как VM способна
-# диспетчеризовать вызов Cqtrace.hit(...) — попытка такого вызова уходит в
-# нулевой нативный code-entry и валит JVM SIGSEGV (нативный краш на уровне
-# ниже байткода: его не лечит ни re-entrancy guard, ни catch(Throwable) в
-# самом hit() — тело hit() просто не успевает начать исполняться).
-#
-# java.lang — ВЕСЬ пакет рекурсивно, включая подпакеты. Раньше исключались
-# только ПРЯМЫЕ члены (предположение "reflect/ref/annotation/management не
-# входят в критический bootstrap-путь" — НЕ подтверждено эмпирически).
-# Реальный краш (pc=0x0 SIGSEGV на старте, gosjava) указал именно на
-# java/lang/ref/* (Reference/Finalizer/FinalReference/WeakReference/
-# SoftReference/PhantomReference/ReferenceQueue — управление GC/
-# финализацией, используется JVM раньше, чем готова произвольная
-# диспетчеризация Java-вызовов) — подпакеты java.lang ТАК ЖЕ критичны, как
-# и сам пакет. java.lang.invoke (ASM-генераторы байткода/nasgen) теперь
-# покрывается тем же правилом, отдельная оговорка не нужна.
-#
-# java.util.concurrent — тоже рекурсивно: ForkJoinPool/ConcurrentHashMap/
-# CompletableFuture и т.п. используются ранними системными потоками (JIT
-# compiler threads, GC) — тот же класс риска, что и java.lang.ref.
-#
-# Остальной java.util (не concurrent), java.io, java.nio — пока только
-# ПРЯМЫЕ члены (нет эмпирического подтверждения, что их подпакеты так же
-# критичны; если найдётся новый краш — расширить по той же схеме).
-_BOOTSTRAP_RX = re.compile(
-    r"(^|/)java/lang/.+\.java$"
-    r"|(^|/)java/util/concurrent/.+\.java$"
-    r"|(^|/)java/(util|io|nio)/[^/]+\.java$"
-)
-
-
-def _is_bootstrap_path(zip_path: str) -> bool:
-    return bool(_BOOTSTRAP_RX.search(zip_path.replace("\\", "/")))
-
-
 def read_fo_numbers(reports_dir: Path):
     """Перечень_ФО → {qualified_name: [(fo_num, file, line), ...]} — СПИСОК,
     а не один номер: одинаковые имена методов в разных классах (toString,
@@ -332,7 +296,7 @@ def match_file_by_base(probe_path: str, by_base: dict):
     basename -> [(relpath_к_out, Path), ...] (см. main()).
 
     Баг (реальный проект, gosjava): java/lang/CharacterData.java
-    (bootstrap-исключён из охвата, см. _is_bootstrap_path) и
+    (исключён из охвата фильтром извлечения) и
     org/w3c/dom/CharacterData.java (обычный, входит в охват) — РАЗНЫЕ файлы
     с ОДИНАКОВЫМ basename. Старый код при единственном кандидате по
     basename возвращал его БЕЗ проверки пути — геометрия первого
@@ -392,15 +356,6 @@ def main():
     ap.add_argument("--no-syntax-check", action="store_true",
                     help="пропустить проверку javac (для Maven/Gradle — её роль выполнит сборка; "
                          "javac всех файлов сразу всё равно требует classpath/зависимости).")
-    ap.add_argument("--no-exclude-bootstrap", action="store_true",
-                    help="НЕ исключать java.lang.*/java.util.*/java.io.*/java.nio.*/"
-                         "java.lang.invoke.* (прямые члены, без подпакетов) из охвата. "
-                         "По умолчанию они исключаются: датчик в этих классах вызывается "
-                         "на раннем bootstrap JVM, до готовности VM диспетчеризовать вызов "
-                         "метода — нативный SIGSEGV, который НЕ лечится ни re-entrancy guard, "
-                         "ни catch(Throwable) внутри Cqtrace.hit() (он не успевает начать "
-                         "исполняться). Снимайте флаг только если уверены, что эти пакеты "
-                         "не входят в реальный охват компиляции вашего проекта.")
     ap.add_argument("--project-db", default="",
                     help="Путь к project.db. Если задан — геометрия точек вставки "
                          "берётся из сырых данных (раздел 'probe'), БЕЗ отдельного "
@@ -420,8 +375,10 @@ def main():
                          "--include-list (область проекта); пусто = не сужает.")
     ap.add_argument("--sensor-exclude-list", default="",
                     help="Текстовый файл — чёрный список шаблонов/путей, которые НЕ получат "
-                         "датчиков (доп. к встроенной bootstrap-защите, см. --no-exclude-bootstrap; "
-                         "для своих находок SIGSEGV/нестабильности без правки кода).")
+                         "датчиков (напр. пакеты раннего bootstrap JVM — java/lang/**, "
+                         "java/util/concurrent/** — датчик там вызывается до готовности VM "
+                         "диспетчеризовать вызов метода и валит нативный SIGSEGV; без правки "
+                         "кода инструментатора под конкретный проект).")
     args = ap.parse_args()
     # Резолвим codeql как статический анализатор (локальный codeql-win/codeql-linux)
     import sys as _sys
@@ -442,7 +399,8 @@ def main():
     exclude_list = read_file_list(args.exclude_list) if args.exclude_list else None
     sensor_include = read_file_list(args.sensor_include_list) if args.sensor_include_list else None
     sensor_exclude = read_file_list(args.sensor_exclude_list) if args.sensor_exclude_list else None
-    _sensor_filter = sensor_filter_factory(sensor_include, sensor_exclude)
+    _sensor_counts: dict = {}
+    _sensor_filter = sensor_filter_factory(sensor_include, sensor_exclude, counters=_sensor_counts)
 
     # 1. Дерево исходников — прямо из src.zip БД (точный снэпшот того, что
     # реально анализировал CodeQL), как у C/C++ (см. core/file_lists.py).
@@ -452,22 +410,16 @@ def main():
     if sensor_exclude or sensor_include:
         print(f"    Доп. фильтр вставки датчиков: белый список "
               f"{len(sensor_include or [])} шабл., чёрный {len(sensor_exclude or [])} шабл.")
-    if args.no_exclude_bootstrap:
-        def _extract_filter(zip_path, _base=_base_filter, _sf=_sensor_filter):
-            if not _sf(zip_path):
-                return False
-            return _base(zip_path) if _base else True
-    else:
-        def _extract_filter(zip_path, _base=_base_filter, _sf=_sensor_filter):
-            if _is_bootstrap_path(zip_path):
-                return False
-            if not _sf(zip_path):
-                return False
-            return _base(zip_path) if _base else True
-        print("    Исключаю из охвата java.lang (полностью, включая подпакеты), "
-              "java.util.concurrent (полностью), java.util/java.io/java.nio "
-              "(прямые члены) — раннний bootstrap JVM, "
-              "см. --no-exclude-bootstrap.")
+
+    # Базовый --pattern проверяем ПЕРВЫМ, а не вместе с _sf: иначе счётчики
+    # sensor_filter_factory засорялись бы файлами, которые в любом случае
+    # вне области проекта (--pattern) — счёт должен отражать именно то,
+    # что реально вырезали белый/чёрный списки датчиков, а не общий шум.
+    def _extract_filter(zip_path, _base=_base_filter, _sf=_sensor_filter):
+        if _base and not _base(zip_path):
+            return False
+        return _sf(zip_path)
+
     extract_res = extract_project_sources(
         db_path, out,
         pattern_filter=_extract_filter,
@@ -477,6 +429,10 @@ def main():
         print(f"    Внимание: {extract_res['generated_skipped']} сгенерированных во время "
               f"сборки файлов потенциально доступны в БД, но отсеяны текущим фильтром "
               f"(--pattern/--include-list/--exclude-list).")
+    if sensor_exclude or sensor_include:
+        print(f"[1.1] Фильтр вставки датчиков: исключено чёрным списком "
+              f"{_sensor_counts.get('excluded', 0)}, не подошло белому списку "
+              f"{_sensor_counts.get('not_in_whitelist', 0)}")
 
     fo_num = read_fo_numbers(reports)
     br_num = read_branch_numbers(reports)

@@ -96,20 +96,31 @@ def path_matches_patterns(path: str, patterns: list) -> bool:
     return False
 
 
-def sensor_filter_factory(include_patterns=None, exclude_patterns=None):
-    """Доп. пользовательский белый/чёрный список ВСТАВКИ ДАТЧИКОВ (см.
-    ProjectDB.set_sensor_filters) — настраиваемая альтернатива/дополнение к
-    жёстко заданным в коде исключениям (напр. _is_bootstrap_path в
+def sensor_filter_factory(include_patterns=None, exclude_patterns=None, counters=None):
+    """Пользовательский белый/чёрный список ВСТАВКИ ДАТЧИКОВ (см.
+    ProjectDB.set_sensor_filters, вкладка «Динамический анализ») — заменяет
+    жёстко заданные в коде исключения (напр. для пакетов раннего bootstrap
+    JVM — java/lang/**, java/util/concurrent/** — см. историю
     instrument_java.py), чтобы не нужно было править сам инструментатор под
     каждый новый проект. Применяется ПОСЛЕ базового --pattern/include-list/
-    exclude-list (общая область проекта, та же, что у статики) и ПОСЛЕ
-    встроенной bootstrap-защиты для Java — сужает или дополнительно
-    исключает файлы, в которые вставляются датчики. Пусто = не ограничивает
-    (семантика как у path_matches_patterns)."""
+    exclude-list (общая область проекта, та же, что у статики) — сужает или
+    дополнительно исключает файлы, в которые вставляются датчики. Пусто =
+    не ограничивает (семантика как у path_matches_patterns).
+
+    counters (опционально) — dict, в который ПОПОЛНЯЮТСЯ (а не
+    перезаписываются) счётчики "excluded" (попал под чёрный список) и
+    "not_in_whitelist" (не подошёл белому списку), чтобы вызывающий код
+    мог сообщить в лог, сколько файлов реально затронули списки — без
+    этого видно только общий "отфильтровано: N" от extract_project_sources,
+    куда сваливаются ВСЕ причины пропуска файла без разбора."""
     def check(zip_path: str) -> bool:
         if exclude_patterns and path_matches_patterns(zip_path, exclude_patterns):
+            if counters is not None:
+                counters["excluded"] = counters.get("excluded", 0) + 1
             return False
         if include_patterns and not path_matches_patterns(zip_path, include_patterns):
+            if counters is not None:
+                counters["not_in_whitelist"] = counters.get("not_in_whitelist", 0) + 1
             return False
         return True
     return check

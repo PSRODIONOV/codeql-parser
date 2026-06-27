@@ -297,7 +297,8 @@ def main():
     exclude_list = read_file_list(args.exclude_list) if args.exclude_list else None
     sensor_include = read_file_list(args.sensor_include_list) if args.sensor_include_list else None
     sensor_exclude = read_file_list(args.sensor_exclude_list) if args.sensor_exclude_list else None
-    _sensor_filter = sensor_filter_factory(sensor_include, sensor_exclude)
+    _sensor_counts: dict = {}
+    _sensor_filter = sensor_filter_factory(sensor_include, sensor_exclude, counters=_sensor_counts)
 
     if out.exists(): shutil.rmtree(out)
     print(f"[1] Извлекаю дерево исходников из src.zip БД -> {out} ...")
@@ -313,10 +314,12 @@ def main():
     # ОТДЕЛЬНЫЙ обязательный базовый фильтр принадлежности проекту.
     _base_filter = _pattern_filter_factory(args.pattern)
 
+    # Базовый --pattern проверяем ПЕРВЫМ (см. instrument_java.py) — счётчики
+    # sensor_filter_factory не должны засоряться файлами вне области проекта.
     def _extract_filter(zip_path, _base=_base_filter, _sf=_sensor_filter):
-        if not _sf(zip_path):
+        if _base and not _base(zip_path):
             return False
-        return _base(zip_path) if _base else True
+        return _sf(zip_path)
 
     extract_res = extract_project_sources(
         db_path, out,
@@ -328,6 +331,10 @@ def main():
         print(f"    Внимание: {extract_res['generated_skipped']} сгенерированных во время "
               f"сборки файлов (ADLC/JVMTI/JFR и т.п.) потенциально доступны в БД, но "
               f"отсеяны текущим фильтром (--pattern/--include-list/--exclude-list).")
+    if sensor_exclude or sensor_include:
+        print(f"[1.1] Фильтр вставки датчиков: исключено чёрным списком "
+              f"{_sensor_counts.get('excluded', 0)}, не подошло белому списку "
+              f"{_sensor_counts.get('not_in_whitelist', 0)}")
 
     fo_num = read_fo_numbers(reports)
     br_num = read_branch_numbers(reports)

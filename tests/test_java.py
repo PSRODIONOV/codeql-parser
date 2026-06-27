@@ -27,7 +27,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "dynamic"))
 from instrument_java import (  # noqa: E402
-    _is_bootstrap_path, dedupe_probe_points, _insertion_is_valid,
+    dedupe_probe_points, _insertion_is_valid,
     match_file_by_base, match_file_by_relpath,
 )
 
@@ -255,22 +255,24 @@ class TestInstrumentorRegressionBugs:
                 f"{fname}: датчик вставлен полным путём branches.Cqtrace.hit(...) "
                 f"— риск коллизии с локальной переменной 'branches'")
 
-    def test_bootstrap_packages_excluded_from_extraction(self):
+    def test_recommended_bootstrap_blacklist_via_sensor_filter(self):
         """Баг (реальный проект, full-coverage JDK): датчик в java.lang/
-        java.util/java.io/java.nio/java.lang.invoke вызывается на раннем
-        bootstrap JVM, до готовности VM диспетчеризовать вызов метода —
-        нативный SIGSEGV (не лечится re-entrancy guard / catch(Throwable) в
-        Cqtrace.hit() — тело не успевает начать исполняться).
+        java.util.concurrent вызывается на раннем bootstrap JVM, до
+        готовности VM диспетчеризовать вызов метода — нативный SIGSEGV (не
+        лечится re-entrancy guard / catch(Throwable) в Cqtrace.hit() — тело
+        не успевает начать исполняться). Реальный краш (pc=0x0 SIGSEGV на
+        старте, gosjava) указал именно на java/lang/ref/* (Reference/
+        Finalizer/WeakReference/... — управление GC/финализацией).
 
-        java.lang исключается ЦЕЛИКОМ, включая подпакеты — реальный краш
-        (pc=0x0 SIGSEGV на старте, gosjava) указал именно на
-        java/lang/ref/* (Reference/Finalizer/WeakReference/... —
-        управление GC/финализацией), хотя предыдущая версия фильтра считала
-        подпакеты java.lang безопасными (предположение не подтвердилось).
-        java.util.concurrent исключается целиком по той же причине (ранние
-        системные потоки JIT/GC). Остальной java.util/java.io/java.nio —
-        пока только прямые члены пакета (нет подтверждённого краша по их
-        подпакетам)."""
+        Раньше это было встроено в код (_is_bootstrap_path/_BOOTSTRAP_RX).
+        Теперь — настраиваемый чёрный список ВСТАВКИ ДАТЧИКОВ (вкладка
+        «Динамический анализ», sensor_filter_factory в core/file_lists.py):
+        этот тест документирует РЕКОМЕНДУЕМЫЕ шаблоны для проектов,
+        собирающих сам JDK (как gosjava), и проверяет, что они дают тот же
+        эффект, что и прежняя встроенная защита."""
+        from core.file_lists import sensor_filter_factory
+        recommended_exclude = ["java/lang/*", "java/util/concurrent/*"]
+        f = sensor_filter_factory(None, recommended_exclude)
         excluded = [
             "java/lang/Object.java",
             "some/build/path/java/lang/String.java",
@@ -279,22 +281,22 @@ class TestInstrumentorRegressionBugs:
             "java/lang/ref/WeakReference.java",
             "java/lang/ref/Finalizer.java",
             "java/lang/management/ManagementFactory.java",
-            "java/util/HashMap.java",
             "java/util/concurrent/ConcurrentHashMap.java",
             "java/util/concurrent/atomic/AtomicLong.java",
-            "java/io/File.java",
-            "java/nio/Buffer.java",
         ]
         kept = [
+            "java/util/HashMap.java",
+            "java/io/File.java",
+            "java/nio/Buffer.java",
             "java/util/regex/Pattern.java",
             "java/nio/channels/Channel.java",
             "com/sun/corba/se/spi/activation/Foo.java",
             "branches/BranchDemo.java",
         ]
         for p in excluded:
-            assert _is_bootstrap_path(p), f"{p}: должен быть исключён (bootstrap)"
+            assert not f(p), f"{p}: должен быть исключён (bootstrap)"
         for p in kept:
-            assert not _is_bootstrap_path(p), f"{p}: НЕ должен быть исключён"
+            assert f(p), f"{p}: НЕ должен быть исключён"
 
     def test_dedupe_probe_points_drops_identical_geometry(self):
         """Общий случай: CodeQL вернул две разные Callable-сущности с
@@ -396,7 +398,7 @@ class TestInstrumentorRegressionBugs:
 
     def test_match_file_rejects_basename_collision_with_excluded_file(self):
         """Баг (реальный проект, gosjava): java/lang/CharacterData.java
-        (bootstrap-исключён из охвата извлечения, см. _is_bootstrap_path) и
+        (исключён из охвата извлечения фильтром) и
         org/w3c/dom/CharacterData.java (обычный файл, входит в охват) — РАЗНЫЕ
         файлы с ОДИНАКОВЫМ basename. Старый match_file() при единственном
         кандидате по basename возвращал его БЕЗ проверки совпадения хвоста
@@ -412,7 +414,7 @@ class TestInstrumentorRegressionBugs:
                 ("proj/jaxp/src/org/w3c/dom/CharacterData.java", Path("/out/proj/jaxp/src/org/w3c/dom/CharacterData.java")),
             ],
         }
-        # java/lang/CharacterData.java исключён из --out (bootstrap), его
+        # java/lang/CharacterData.java исключён из --out фильтром, его
         # реального кандидата в by_base нет — единственный кандидат по
         # basename физически НЕ относится к этому пути.
         probe_path = "/tmp/java_build.X/proj/jdk/src/share/classes/java/lang/CharacterData.java"

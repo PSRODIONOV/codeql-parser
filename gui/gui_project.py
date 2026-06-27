@@ -1164,11 +1164,12 @@ class DynamicTab(QWidget):
         self.buildsys_cb.toggled.connect(self._update_extra_placeholder)
         lay.addWidget(self.buildsys_cb)
 
-        # Фильтры ВСТАВКИ ДАТЧИКОВ: доп. белый/чёрный список (шаблон пути,
-        # см. core/file_lists.py::sensor_filter_factory) — настраиваемая
-        # альтернатива жёстко заданным в коде исключениям (напр.
-        # _is_bootstrap_path в instrument_java.py), сохраняется в рамках
-        # проекта (ProjectDB.set_sensor_filters/get_sensor_filters).
+        # Фильтры ВСТАВКИ ДАТЧИКОВ: белый/чёрный список (шаблон пути, см.
+        # core/file_lists.py::sensor_filter_factory) — настраиваемая замена
+        # прежним жёстко заданным в коде исключениям (пакеты раннего
+        # bootstrap JVM — для java/lang/**, java/util/concurrent/** см.
+        # подсказку в placeholder чёрного списка ниже), сохраняется в
+        # рамках проекта (ProjectDB.set_sensor_filters/get_sensor_filters).
         sensor_filt_group = QGroupBox(
             "Фильтры вставки датчиков (шаблон пути, по одному на строку; "
             "доп. к встроенным исключениям и к фильтрам охвата проекта)")
@@ -1182,8 +1183,9 @@ class DynamicTab(QWidget):
         sfg.addWidget(QLabel("Чёрный список (исключить из датчиков):"), 0, 1)
         self.sensor_exclude_edit = QPlainTextEdit()
         self.sensor_exclude_edit.setPlaceholderText(
-            "напр.: java/lang/ref/*\njava/util/concurrent/*\n"
-            "(для Java встроенная bootstrap-защита уже включена по умолчанию)")
+            "напр., для Java — пакеты раннего bootstrap JVM (датчик там "
+            "вызывается до готовности VM, нативный SIGSEGV):\n"
+            "java/lang/*\njava/util/concurrent/*")
         self.sensor_exclude_edit.setMaximumHeight(60)
         sfg.addWidget(self.sensor_exclude_edit, 1, 1)
         lay.addWidget(sensor_filt_group)
