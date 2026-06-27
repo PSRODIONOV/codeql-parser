@@ -70,13 +70,29 @@ def _find_jdk_tool(tool: str):
 # диспетчеризовать вызов Cqtrace.hit(...) — попытка такого вызова уходит в
 # нулевой нативный code-entry и валит JVM SIGSEGV (нативный краш на уровне
 # ниже байткода: его не лечит ни re-entrancy guard, ни catch(Throwable) в
-# самом hit() — тело hit() просто не успевает начать исполняться). Только
-# ПРЯМЫЕ члены пакета (java.lang.* в смысле import-звёздочки, БЕЗ
-# подпакетов) — java.lang.reflect/ref/annotation/management и т.п. не входят
-# в критический bootstrap-путь и инструментируются как обычно. java.lang.invoke
-# исключён отдельно (ASM-генераторы байткода/nasgen дёргают его так же рано).
+# самом hit() — тело hit() просто не успевает начать исполняться).
+#
+# java.lang — ВЕСЬ пакет рекурсивно, включая подпакеты. Раньше исключались
+# только ПРЯМЫЕ члены (предположение "reflect/ref/annotation/management не
+# входят в критический bootstrap-путь" — НЕ подтверждено эмпирически).
+# Реальный краш (pc=0x0 SIGSEGV на старте, gosjava) указал именно на
+# java/lang/ref/* (Reference/Finalizer/FinalReference/WeakReference/
+# SoftReference/PhantomReference/ReferenceQueue — управление GC/
+# финализацией, используется JVM раньше, чем готова произвольная
+# диспетчеризация Java-вызовов) — подпакеты java.lang ТАК ЖЕ критичны, как
+# и сам пакет. java.lang.invoke (ASM-генераторы байткода/nasgen) теперь
+# покрывается тем же правилом, отдельная оговорка не нужна.
+#
+# java.util.concurrent — тоже рекурсивно: ForkJoinPool/ConcurrentHashMap/
+# CompletableFuture и т.п. используются ранними системными потоками (JIT
+# compiler threads, GC) — тот же класс риска, что и java.lang.ref.
+#
+# Остальной java.util (не concurrent), java.io, java.nio — пока только
+# ПРЯМЫЕ члены (нет эмпирического подтверждения, что их подпакеты так же
+# критичны; если найдётся новый краш — расширить по той же схеме).
 _BOOTSTRAP_RX = re.compile(
-    r"(^|/)java/lang/(invoke/)?[^/]+\.java$"
+    r"(^|/)java/lang/.+\.java$"
+    r"|(^|/)java/util/concurrent/.+\.java$"
     r"|(^|/)java/(util|io|nio)/[^/]+\.java$"
 )
 
@@ -398,6 +414,14 @@ def main():
                     help="каталог для Cqtrace.java (относительно копии); должен соответствовать "
                          "пакету и компилироваться в MAIN-фазе, напр. src/main/org/h2 "
                          "(вместе с --cqtrace-package org.h2).")
+    ap.add_argument("--sensor-include-list", default="",
+                    help="Текстовый файл — белый список шаблонов/путей ВСТАВКИ ДАТЧИКОВ "
+                         "(по одному на строку, см. core/file_lists.py). Доп. к --pattern/ "
+                         "--include-list (область проекта); пусто = не сужает.")
+    ap.add_argument("--sensor-exclude-list", default="",
+                    help="Текстовый файл — чёрный список шаблонов/путей, которые НЕ получат "
+                         "датчиков (доп. к встроенной bootstrap-защите, см. --no-exclude-bootstrap; "
+                         "для своих находок SIGSEGV/нестабильности без правки кода).")
     args = ap.parse_args()
     # Резолвим codeql как статический анализатор (локальный codeql-win/codeql-linux)
     import sys as _sys
@@ -408,7 +432,7 @@ def main():
         print(f"[codeql] {args.codeql}")
     except Exception:
         pass
-    from core.file_lists import extract_project_sources, read_file_list
+    from core.file_lists import extract_project_sources, read_file_list, sensor_filter_factory
 
     db_path = Path(args.db).resolve()
     out = Path(args.out).resolve()
@@ -416,21 +440,33 @@ def main():
 
     include_list = read_file_list(args.include_list) if args.include_list else None
     exclude_list = read_file_list(args.exclude_list) if args.exclude_list else None
+    sensor_include = read_file_list(args.sensor_include_list) if args.sensor_include_list else None
+    sensor_exclude = read_file_list(args.sensor_exclude_list) if args.sensor_exclude_list else None
+    _sensor_filter = sensor_filter_factory(sensor_include, sensor_exclude)
 
     # 1. Дерево исходников — прямо из src.zip БД (точный снэпшот того, что
     # реально анализировал CodeQL), как у C/C++ (см. core/file_lists.py).
     print(f"[1] Извлекаю дерево исходников из src.zip БД -> {out} ...")
     from instrument_c_make import _pattern_filter_factory
     _base_filter = _pattern_filter_factory(args.pattern)
+    if sensor_exclude or sensor_include:
+        print(f"    Доп. фильтр вставки датчиков: белый список "
+              f"{len(sensor_include or [])} шабл., чёрный {len(sensor_exclude or [])} шабл.")
     if args.no_exclude_bootstrap:
-        _extract_filter = _base_filter
-    else:
-        def _extract_filter(zip_path, _base=_base_filter):
-            if _is_bootstrap_path(zip_path):
+        def _extract_filter(zip_path, _base=_base_filter, _sf=_sensor_filter):
+            if not _sf(zip_path):
                 return False
             return _base(zip_path) if _base else True
-        print("    Исключаю из охвата java.lang/java.util/java.io/java.nio/"
-              "java.lang.invoke (прямые члены) — раннний bootstrap JVM, "
+    else:
+        def _extract_filter(zip_path, _base=_base_filter, _sf=_sensor_filter):
+            if _is_bootstrap_path(zip_path):
+                return False
+            if not _sf(zip_path):
+                return False
+            return _base(zip_path) if _base else True
+        print("    Исключаю из охвата java.lang (полностью, включая подпакеты), "
+              "java.util.concurrent (полностью), java.util/java.io/java.nio "
+              "(прямые члены) — раннний bootstrap JVM, "
               "см. --no-exclude-bootstrap.")
     extract_res = extract_project_sources(
         db_path, out,

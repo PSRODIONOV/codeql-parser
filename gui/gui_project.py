@@ -1164,6 +1164,35 @@ class DynamicTab(QWidget):
         self.buildsys_cb.toggled.connect(self._update_extra_placeholder)
         lay.addWidget(self.buildsys_cb)
 
+        # Фильтры ВСТАВКИ ДАТЧИКОВ: доп. белый/чёрный список (шаблон пути,
+        # см. core/file_lists.py::sensor_filter_factory) — настраиваемая
+        # альтернатива жёстко заданным в коде исключениям (напр.
+        # _is_bootstrap_path в instrument_java.py), сохраняется в рамках
+        # проекта (ProjectDB.set_sensor_filters/get_sensor_filters).
+        sensor_filt_group = QGroupBox(
+            "Фильтры вставки датчиков (шаблон пути, по одному на строку; "
+            "доп. к встроенным исключениям и к фильтрам охвата проекта)")
+        sfg = QGridLayout(sensor_filt_group)
+        sfg.addWidget(QLabel("Белый список (включить):"), 0, 0)
+        self.sensor_include_edit = QPlainTextEdit()
+        self.sensor_include_edit.setPlaceholderText(
+            "пусто = не ограничивает\nнапр.: */com/example/*")
+        self.sensor_include_edit.setMaximumHeight(60)
+        sfg.addWidget(self.sensor_include_edit, 1, 0)
+        sfg.addWidget(QLabel("Чёрный список (исключить из датчиков):"), 0, 1)
+        self.sensor_exclude_edit = QPlainTextEdit()
+        self.sensor_exclude_edit.setPlaceholderText(
+            "напр.: java/lang/ref/*\njava/util/concurrent/*\n"
+            "(для Java встроенная bootstrap-защита уже включена по умолчанию)")
+        self.sensor_exclude_edit.setMaximumHeight(60)
+        sfg.addWidget(self.sensor_exclude_edit, 1, 1)
+        lay.addWidget(sensor_filt_group)
+        flt = self.proj.get_sensor_filters()
+        if flt["include"]:
+            self.sensor_include_edit.setPlainText("\n".join(flt["include"]))
+        if flt["exclude"]:
+            self.sensor_exclude_edit.setPlainText("\n".join(flt["exclude"]))
+
         # Доп. аргументы — по чек-боксу, плейсхолдер зависит от языка
         self.extra_cb = QCheckBox("Дополнительные аргументы инструментатора")
         self.extra_cb.toggled.connect(lambda v: self.extra_edit.setVisible(v))
@@ -1228,6 +1257,10 @@ class DynamicTab(QWidget):
     def _on_src(self, path):
         # копируем исходники в orig-sources
         pass  # фиксируем путь, копирование при инструментации
+
+    @staticmethod
+    def _lines(edit) -> list:
+        return [ln.strip() for ln in edit.toPlainText().splitlines() if ln.strip()]
 
     def _update_extra_placeholder(self):
         """Плейсхолдер «Доп. аргументы» — по языку проекта и режиму сборки."""
@@ -1398,6 +1431,22 @@ class DynamicTab(QWidget):
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text("\n".join(flt["exclude_list"]), encoding="utf-8")
                 cmd += ["--exclude-list", str(p)]
+            # Доп. белый/чёрный список ВСТАВКИ ДАТЧИКОВ (отдельно от флагов
+            # охвата проекта выше) — сохраняем в проект при каждом запуске
+            # инструментации, чтобы список не терялся при закрытии окна.
+            sensor_include = self._lines(self.sensor_include_edit)
+            sensor_exclude = self._lines(self.sensor_exclude_edit)
+            self.proj.set_sensor_filters(sensor_include, sensor_exclude)
+            if sensor_include:
+                p = self.proj.root / "work" / "sensor_include_list.txt"
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("\n".join(sensor_include), encoding="utf-8")
+                cmd += ["--sensor-include-list", str(p)]
+            if sensor_exclude:
+                p = self.proj.root / "work" / "sensor_exclude_list.txt"
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("\n".join(sensor_exclude), encoding="utf-8")
+                cmd += ["--sensor-exclude-list", str(p)]
             # У C/C++ "своя сборка" переключает СКРИПТ (instrument_c_make.py
             # вообще не делает standalone-проверку синтаксиса — её роль
             # выполняет make). instrument_java.py — один скрипт на оба

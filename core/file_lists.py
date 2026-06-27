@@ -96,6 +96,25 @@ def path_matches_patterns(path: str, patterns: list) -> bool:
     return False
 
 
+def sensor_filter_factory(include_patterns=None, exclude_patterns=None):
+    """Доп. пользовательский белый/чёрный список ВСТАВКИ ДАТЧИКОВ (см.
+    ProjectDB.set_sensor_filters) — настраиваемая альтернатива/дополнение к
+    жёстко заданным в коде исключениям (напр. _is_bootstrap_path в
+    instrument_java.py), чтобы не нужно было править сам инструментатор под
+    каждый новый проект. Применяется ПОСЛЕ базового --pattern/include-list/
+    exclude-list (общая область проекта, та же, что у статики) и ПОСЛЕ
+    встроенной bootstrap-защиты для Java — сужает или дополнительно
+    исключает файлы, в которые вставляются датчики. Пусто = не ограничивает
+    (семантика как у path_matches_patterns)."""
+    def check(zip_path: str) -> bool:
+        if exclude_patterns and path_matches_patterns(zip_path, exclude_patterns):
+            return False
+        if include_patterns and not path_matches_patterns(zip_path, include_patterns):
+            return False
+        return True
+    return check
+
+
 def is_generated_path(path: str) -> bool:
     """Эвристика: файл — артефакт, появляющийся только во время сборки
     (ADLC/JVMTI/JFR-генераторы и т.п.), а не часть исходников, написанных

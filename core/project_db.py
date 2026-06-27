@@ -405,6 +405,23 @@ class ProjectDB:
             "exclude_list": self.load_derived("exclude_file_list", []) or [],
         }
 
+    # ── Фильтры ВСТАВКИ ДАТЧИКОВ (белый/чёрный список инструментации) ────────
+    def set_sensor_filters(self, include: List[str], exclude: List[str]):
+        """Отдельно от set_file_filters (область статического анализа) —
+        этот список сужает/дополняет именно вставку датчиков (см.
+        core/file_lists.py::sensor_filter_factory, dynamic/instrument_java.py/
+        instrument_cpp.py/instrument_c_make.py), не требуя правок кода
+        инструментатора под конкретный проект. Сохраняется в рамках
+        анализируемого проекта (project.db), как и остальные настройки."""
+        self.save_derived("sensor_include_patterns", include or [])
+        self.save_derived("sensor_exclude_patterns", exclude or [])
+
+    def get_sensor_filters(self) -> Dict[str, List[str]]:
+        return {
+            "include": self.load_derived("sensor_include_patterns", []) or [],
+            "exclude": self.load_derived("sensor_exclude_patterns", []) or [],
+        }
+
     # ── Блок-схемы (SVG) ─────────────────────────────────────────────────────
     def save_flowcharts(self, items: List[Dict[str, Any]]):
         """items: [{'fo_num', 'fo_name', 'filename', 'svg'}, ...]."""

@@ -260,22 +260,32 @@ class TestInstrumentorRegressionBugs:
         java.util/java.io/java.nio/java.lang.invoke вызывается на раннем
         bootstrap JVM, до готовности VM диспетчеризовать вызов метода —
         нативный SIGSEGV (не лечится re-entrancy guard / catch(Throwable) в
-        Cqtrace.hit() — тело не успевает начать исполняться). Эти ПРЯМЫЕ
-        члены пакетов (без подпакетов — java.lang.reflect/ref/annotation и
-        т.п. безопасны и должны остаться в охвате) исключаются из
-        извлечения исходников по умолчанию (см. --no-exclude-bootstrap)."""
+        Cqtrace.hit() — тело не успевает начать исполняться).
+
+        java.lang исключается ЦЕЛИКОМ, включая подпакеты — реальный краш
+        (pc=0x0 SIGSEGV на старте, gosjava) указал именно на
+        java/lang/ref/* (Reference/Finalizer/WeakReference/... —
+        управление GC/финализацией), хотя предыдущая версия фильтра считала
+        подпакеты java.lang безопасными (предположение не подтвердилось).
+        java.util.concurrent исключается целиком по той же причине (ранние
+        системные потоки JIT/GC). Остальной java.util/java.io/java.nio —
+        пока только прямые члены пакета (нет подтверждённого краша по их
+        подпакетам)."""
         excluded = [
             "java/lang/Object.java",
             "some/build/path/java/lang/String.java",
             "java/lang/invoke/LambdaForm.java",
+            "java/lang/reflect/Method.java",
+            "java/lang/ref/WeakReference.java",
+            "java/lang/ref/Finalizer.java",
+            "java/lang/management/ManagementFactory.java",
             "java/util/HashMap.java",
+            "java/util/concurrent/ConcurrentHashMap.java",
+            "java/util/concurrent/atomic/AtomicLong.java",
             "java/io/File.java",
             "java/nio/Buffer.java",
         ]
         kept = [
-            "java/lang/reflect/Method.java",
-            "java/lang/ref/WeakReference.java",
-            "java/util/concurrent/ConcurrentHashMap.java",
             "java/util/regex/Pattern.java",
             "java/nio/channels/Channel.java",
             "com/sun/corba/se/spi/activation/Foo.java",

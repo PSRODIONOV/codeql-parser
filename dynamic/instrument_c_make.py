@@ -270,6 +270,13 @@ def main():
     ap.add_argument("--exclude-list", default="", help="Текстовый файл — чёрный список путей (по одному на строку)")
     ap.add_argument("--no-branches", action="store_true",
                     help="инструментировать только вход/выход ФО, без датчиков ветвей")
+    ap.add_argument("--sensor-include-list", default="",
+                    help="Текстовый файл — белый список шаблонов/путей ВСТАВКИ ДАТЧИКОВ "
+                         "(по одному на строку, см. core/file_lists.py). Доп. к --pattern/ "
+                         "--include-list (область проекта); пусто = не сужает.")
+    ap.add_argument("--sensor-exclude-list", default="",
+                    help="Текстовый файл — чёрный список шаблонов/путей, которые НЕ получат "
+                         "датчиков (без правки кода инструментатора).")
     args = ap.parse_args()
 
     import sys as _sys
@@ -280,7 +287,7 @@ def main():
         print(f"[codeql] {args.codeql}")
     except Exception:
         pass
-    from core.file_lists import extract_project_sources, read_file_list
+    from core.file_lists import extract_project_sources, read_file_list, sensor_filter_factory
 
     db_path = Path(args.db).resolve()
     out = Path(args.out).resolve()
@@ -288,9 +295,15 @@ def main():
 
     include_list = read_file_list(args.include_list) if args.include_list else None
     exclude_list = read_file_list(args.exclude_list) if args.exclude_list else None
+    sensor_include = read_file_list(args.sensor_include_list) if args.sensor_include_list else None
+    sensor_exclude = read_file_list(args.sensor_exclude_list) if args.sensor_exclude_list else None
+    _sensor_filter = sensor_filter_factory(sensor_include, sensor_exclude)
 
     if out.exists(): shutil.rmtree(out)
     print(f"[1] Извлекаю дерево исходников из src.zip БД -> {out} ...")
+    if sensor_exclude or sensor_include:
+        print(f"    Доп. фильтр вставки датчиков: белый список "
+              f"{len(sensor_include or [])} шабл., чёрный {len(sensor_exclude or [])} шабл.")
     # Содержимое --include-list/--exclude-list передаём ОДНОВРЕМЕННО и как
     # glob-шаблоны, и как точные/относительные пути (см. path_matches_patterns/
     # path_matches_list в core/file_lists.py) — та же двойная семантика, что
@@ -298,9 +311,16 @@ def main():
     # без '*'/'?' надёжнее матчатся как путь (совпадение по хвосту), а
     # строки-шаблоны срабатывают через glob. --pattern (isProjectFile) — это
     # ОТДЕЛЬНЫЙ обязательный базовый фильтр принадлежности проекту.
+    _base_filter = _pattern_filter_factory(args.pattern)
+
+    def _extract_filter(zip_path, _base=_base_filter, _sf=_sensor_filter):
+        if not _sf(zip_path):
+            return False
+        return _base(zip_path) if _base else True
+
     extract_res = extract_project_sources(
         db_path, out,
-        pattern_filter=_pattern_filter_factory(args.pattern),
+        pattern_filter=_extract_filter,
         include_patterns=include_list, exclude_patterns=exclude_list,
         include_list=include_list, exclude_list=exclude_list, log=print)
     db_prefix = extract_res["prefix"]

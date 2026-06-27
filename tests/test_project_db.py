@@ -109,6 +109,18 @@ def test_derived_roundtrip(proj):
     assert proj.load_derived("include_patterns") == ["*/src/*"]
 
 
+def test_sensor_filters_roundtrip(proj):
+    """Белый/чёрный список вставки датчиков (вкладка «Динамический анализ»)
+    — отдельно от set_file_filters (область статического анализа),
+    сохраняется и читается в рамках проекта."""
+    assert proj.get_sensor_filters() == {"include": [], "exclude": []}
+    proj.set_sensor_filters(["*/com/example/*"], ["java/lang/ref/*", "java/util/concurrent/*"])
+    assert proj.get_sensor_filters() == {
+        "include": ["*/com/example/*"],
+        "exclude": ["java/lang/ref/*", "java/util/concurrent/*"],
+    }
+
+
 def test_derived_map_roundtrip(proj):
     # dict[func -> value] — построчно (без гигантских JSON-строк)
     branch_inv = {
