@@ -228,34 +228,3 @@ def java_routes():
 def java_src():
     return _src_dir("test-project-java")
 
-@pytest.fixture(scope="session")
-def js_fo():
-    return load_report("js", "Перечень_ФО(процедур_функций).csv")
-
-@pytest.fixture(scope="session")
-def js_sig():
-    return sig_findings("js")
-
-@pytest.fixture(scope="session")
-def js_routes():
-    return load_routes("js")
-
-@pytest.fixture(scope="session")
-def js_src():
-    return _src_dir("test-project-js")
-
-@pytest.fixture(scope="session")
-def py_fo():
-    return load_report("python", "Перечень_ФО(процедур_функций).csv")
-
-@pytest.fixture(scope="session")
-def py_sig():
-    return sig_findings("python")
-
-@pytest.fixture(scope="session")
-def py_routes():
-    return load_routes("python")
-
-@pytest.fixture(scope="session")
-def py_src():
-    return _src_dir("test-project-python")

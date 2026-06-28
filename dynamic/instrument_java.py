@@ -15,13 +15,18 @@
 Дерево исходников извлекается прямо из src.zip внутри CodeQL БД (как и для
 C/C++, см. core/file_lists.py) — отдельно передавать --project не нужно.
 
+Геометрия вставки (позиция входа/выхода ФО, позиция ветви, включая catch —
+обычные строки Перечень_ветвей.csv со своим номером) читается прямо из
+отчётов статики (Перечень_ФО/Перечень_ветвей.csv), считается в
+queries/java/functional_objects.ql/function_flow.ql/catch_points.ql.
+
 Использование:
   python3 instrument_java.py --db <codeql-db> --reports <static-dir>
       --out <work-dir> [--codeql codeql] [--lang java]
       [--include-list files.txt] [--exclude-list files.txt]
-      [--project-db project.db] [--trace-tag <tag>]
+      [--trace-tag <tag>]
 """
-import argparse, tempfile, csv, os, re, shutil, subprocess, sys
+import argparse, csv, os, re, shutil, subprocess, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -86,7 +91,11 @@ def read_fo_numbers(reports_dir: Path):
 
 
 def read_branch_numbers(reports_dir: Path):
-    """Перечень_ветвей → {(qualified_name, line): [(branch_num, file), ...]}."""
+    """Перечень_ветвей → {(qualified_name, line): [(branch_num, file, ins_col), ...]}.
+    ins_col (из "Позиция вставки") — дисамбигуация if/else ОДНОСТРОЧНОЙ формы
+    (`if (x) { a(); } else { b(); }` на одной строке): у обоих одна "Строка",
+    различаются только колонкой вставки (см. _pick_by_branch в
+    instrument_cpp.py — тот же класс коллизии)."""
     br = {}
     p = reports_dir / "Перечень_ветвей.csv"
     with open(p, encoding="utf-8-sig") as fh:
@@ -94,8 +103,70 @@ def read_branch_numbers(reports_dir: Path):
             if len(row) >= 7 and row[2].strip() and row[6].strip():
                 key = (row[2].strip(), int(row[6]))
                 file = row[5].strip() if len(row) > 5 and row[5].strip() else None
-                br.setdefault(key, []).append((int(row[3]), file))
+                ins_col = None
+                if len(row) > 7 and ":" in row[7]:
+                    try:
+                        ins_col = int(row[7].rsplit(":", 1)[1])
+                    except ValueError:
+                        pass
+                br.setdefault(key, []).append((int(row[3]), file, ins_col))
     return br
+
+
+def _parse_pos(s: str):
+    """'line:col' -> (line, col); пусто/мусор -> (0, 0)."""
+    if s and ":" in s:
+        a, b = s.split(":", 1)
+        try:
+            return int(a), int(b)
+        except ValueError:
+            pass
+    return 0, 0
+
+
+def read_fo_geometry(reports_dir: Path):
+    """Геометрия входа/выхода ФО — из Перечень_ФО(процедур_функций).csv
+    (колонки "Позиция входа"/"Позиция выхода", считаются в
+    functional_objects.ql). Формат результата: kind/func/file/ref_line/
+    open_line/open_col/has_block/close_line/close_col/btype — это и
+    ожидает main()."""
+    pts = []
+    p = reports_dir / "Перечень_ФО(процедур_функций).csv"
+    with open(p, encoding="utf-8-sig") as fh:
+        for row in list(csv.reader(fh, delimiter=";"))[1:]:
+            if not (row and row[0].strip() and len(row) > 5 and row[1].strip()):
+                continue
+            name = row[1].strip()
+            m = re.match(r'^(.*)\((\d+)\)$', row[2].strip()) if row[2].strip() else None
+            if not m:
+                continue
+            file, ref_line = m.group(1), int(m.group(2))
+            open_line, open_col = _parse_pos(row[4].strip())
+            close_line, close_col = _parse_pos(row[5].strip())
+            pts.append({"kind": "entry", "func": name, "file": file, "ref_line": ref_line,
+                        "open_line": open_line, "open_col": open_col, "has_block": 0,
+                        "close_line": close_line, "close_col": close_col, "btype": "-"})
+    return pts
+
+
+def read_branch_geometry(reports_dir: Path):
+    """Геометрия ветвей — из Перечень_ветвей.csv (колонка "Позиция вставки",
+    считается в function_flow.ql/viz/flowchart_generator.py). catch — обычные
+    строки этого же отчёта (Тип=catch), со своим номером ветви (не общим с
+    try)."""
+    pts = []
+    p = reports_dir / "Перечень_ветвей.csv"
+    with open(p, encoding="utf-8-sig") as fh:
+        for row in list(csv.reader(fh, delimiter=";"))[1:]:
+            if not (len(row) >= 8 and row[2].strip() and row[6].strip()):
+                continue
+            func, btype, file, ref_line = row[2].strip(), row[4].strip(), row[5].strip(), int(row[6])
+            open_line, open_col = _parse_pos(row[7].strip())
+            has_block = 2 if btype in ("case", "default") else 1
+            pts.append({"kind": "branch", "func": func, "file": file, "ref_line": ref_line,
+                        "open_line": open_line, "open_col": open_col, "has_block": has_block,
+                        "close_line": 0, "close_col": 0, "btype": btype})
+    return pts
 
 
 def _file_matches(a, b) -> bool:
@@ -109,7 +180,7 @@ def _pick_by_file(cands, file, line=None):
     """cands — список (номер, файл[, строка]) для одного имени. Один
     кандидат — однозначно он. При коллизии (одноимённые методы в разных
     классах/файлах) — сначала файл+строка точно (различает перегрузки в
-    одном файле), затем только файл; иначе — первый, как раньше."""
+    одном файле), затем только файл; иначе — первый кандидат."""
     if not cands:
         return None
     if len(cands) == 1:
@@ -130,102 +201,53 @@ def _lookup_fo(fn: str, file: str, line, fo_num: dict) -> int | None:
     return _pick_by_file(fo_num.get(fn), file, line)
 
 
-def _lookup_br(fn: str, ref_line: int, file: str, br_num: dict) -> int | None:
+def _pick_by_branch(cands, file, ins_col):
+    """См. instrument_cpp.py::_pick_by_branch — точное совпадение колонки
+    вставки различает if/else однострочной формы (одна "Строка", разный
+    ins_col), затем файл, иначе первый кандидат."""
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0][0]
+    if ins_col:
+        for num, cfile, ccol in cands:
+            if ccol == ins_col and (not file or not cfile or _file_matches(cfile, file)):
+                return num
+    if file:
+        for num, cfile, _ in cands:
+            if _file_matches(cfile, file):
+                return num
+    return cands[0][0]
+
+
+def _lookup_br(fn: str, ref_line: int, file: str, ins_col, br_num: dict) -> int | None:
     for d in (0, 1, -1, 2, -2):
         cands = br_num.get((fn, ref_line + d))
         if cands:
-            return _pick_by_file(cands, file)
+            return _pick_by_branch(cands, file, ins_col)
     return None
 
 
-def run_probe_query(codeql, db, query, path_pattern="%"):
-    content = query.read_text(encoding="utf-8")
-    if "${PROJECT_PATTERN}" in content:
-        query_to_run = query.parent / f".{query.name}"
-        query_to_run.write_text(content.replace("${PROJECT_PATTERN}", path_pattern or "%"), encoding="utf-8")
-    else:
-        query_to_run = query
-    bqrs = Path(tempfile.gettempdir(), "probe_java.bqrs"); csvp = Path(tempfile.gettempdir(), "probe_java.csv")
-    subprocess.run([codeql, "query", "run", f"--database={db}", f"--output={bqrs}", str(query_to_run)],
-                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    with open(csvp, "w") as out:
-        subprocess.run([codeql, "bqrs", "decode", "--format=csv", str(bqrs)],
-                       check=True, stdout=out, stderr=subprocess.DEVNULL)
-    pts = []
-    with open(csvp, encoding="utf-8") as fh:
-        r = csv.reader(fh); next(r, None)
-        for row in r:
-            # kind, func, file, ref_line, ins_line, ins_col, has_block, btype, end_line, end_col
-            if len(row) < 10: continue
-            pts.append({"kind": row[0], "func": row[1], "file": row[2],
-                        "ref_line": int(row[3]), "open_line": int(row[4]), "open_col": int(row[5]),
-                        "has_block": int(row[6]),
-                        "close_line": int(row[8]), "close_col": int(row[9]), "btype": row[7]})
-    return pts
-
-
-def read_probe_points_from_db(project_db_path: str):
-    """Читает геометрию точек вставки из СЫРЫХ ДАННЫХ project.db (раздел
-    'probe', собранный на этапе статики через probe_points.ql) — без
-    отдельного запроса к CodeQL-БД (см. instrument_cpp.py). Колонки
-    queries/java/probe_points.ql названы ТАК ЖЕ, как у C++-варианта
-    (ref_line/ins_line/ins_col/end_line/end_col — см. RAW_SCHEMA["q_probe"]
-    в core/project_db.py), чтобы одна таблица БД годилась для обоих языков."""
-    import sys as _sys
-    _sys.path.insert(0, str(HERE.parent))
-    from core.project_db import ProjectDB
-
-    def _i(v):
-        try:
-            return int(v)
-        except (ValueError, TypeError):
-            return 0
-
-    proj = ProjectDB.open(project_db_path)
-    try:
-        rows = proj.load_raw_data().get("probe", [])
-    finally:
-        proj.close()
-    pts = []
-    for r in rows:
-        pts.append({
-            "kind": r.get("kind", ""), "func": r.get("func", ""), "file": r.get("file", ""),
-            "ref_line": _i(r.get("ref_line")), "open_line": _i(r.get("ins_line")),
-            "open_col": _i(r.get("ins_col")), "has_block": _i(r.get("has_block")),
-            "close_line": _i(r.get("end_line")),
-            "close_col": _i(r.get("end_col")), "btype": r.get("btype", ""),
-        })
-    return pts
 
 
 _SYNTHETIC_INIT_SUFFIXES = (".<clinit>", ".<obinit>")
 
 
 def dedupe_probe_points(pts, log=print):
-    """Убирает точки вставки с ПОЛНОСТЬЮ совпадающей геометрией (kind/file/
+    """Убирает точки вставки с полностью совпадающей геометрией (kind/file/
     open_line/open_col/close_line/close_col).
 
-    Подтверждённый реальный кейс (gosjava-java, прогон probe_points.ql
-    напрямую против CodeQL-БД, 1628 дублей, все entry): класс БЕЗ единого
-    написанного в исходнике static{}/instance-блока (напр. только static
-    final поля-константы — компилятор сам генерирует байткод <clinit> без
-    единой строчки текста для него) — CodeQL всё равно синтезирует И
-    <clinit>, И <obinit>, и у ОБОИХ "тело" вырождено в позицию ПРЯМО ПОСЛЕ
-    открывающей скобки самого объявления класса (проверено по исходнику:
-    CharsetDecoder.java:137 — это `public abstract class CharsetDecoder {`,
-    а не какой-либо static/instance-блок). Ни один из них не присутствует в
-    исходнике в явном виде — такая коллизия молча отбрасывается, БЕЗ счёта
-    в "Дубликатов отброшено" (см. ниже): это не аномалия программы анализа,
-    а штатное расхождение модели CodeQL с тем, что реально написано.
-    Различить на уровне .ql-запроса синтетическую пару от настоящего явного
-    static{}-блока надёжно не вышло (см. историю фиксов) — getLocation() у
-    <clinit>/<obinit> в CodeQL почти всегда указывает на класс независимо от
-    того, есть явный блок или нет, так что фильтрация по этому критерию
-    задевала и реальные блоки в других классах проекта.
+    Для класса без явного static{}/instance-блока в исходнике CodeQL всё
+    равно синтезирует и <clinit>, и <obinit>, и у обоих "тело" вырождено в
+    одну и ту же позицию сразу после `{` объявления класса. Такая пара
+    отбрасывается без счёта в "Дубликатов отброшено" — это не аномалия,
+    а штатное расхождение модели CodeQL с реальным исходником.
+    getLocation() у <clinit>/<obinit> почти всегда указывает на класс
+    независимо от того, есть явный блок или нет, поэтому различить
+    синтетическую пару от настоящей на уровне .ql-запроса нельзя.
 
-    Любая ДРУГАЯ дублирующаяся геометрия (другой kind, либо не пара
-    <clinit>/<obinit>) — настоящая аномалия, считается и логируется, как и
-    раньше."""
+    Любая другая дублирующаяся геометрия (другой kind, либо не пара
+    <clinit>/<obinit>) — настоящая аномалия, считается и логируется."""
     seen = {}
     out = []
     dup = 0
@@ -248,26 +270,20 @@ def dedupe_probe_points(pts, log=print):
 
 
 def _insertion_is_valid(ln: str, eff: int, prio: int, has_block: int = 1) -> bool:
-    """Геометрия из CodeQL иногда не попадает на границу токена (реальный
-    кейс: com.sun.corba...ObjectStreamClass.getFields() — вставка пришлась
-    ВНУТРЬ имени метода/переменной, разрезав идентификатор пополам:
-    "getField" + датчик + "s()", а закрывающая — внутрь "length"). Открывающая
-    вставка с has_block=1 (prio=0: вход ФО ИЛИ ветвь if/for/while/do/try/
-    catch/else) ВСЕГДА должна идти СРАЗУ после '{', закрывающая (prio=1:
-    выход ФО) — СТРОГО на месте '}' тела (см. add_ins/ins_col в main:
-    открытие — ins_col как 0-based индекс ПОСЛЕ '{', закрытие — close_col-1
-    как 0-based индекс САМОГО '}'). has_block=2 (case/default метка switch)
-    — датчик ставится сразу после ':' без обёртки в {} (см. has_block=2 в
-    probe_points.ql и instrument_cpp.py: op "direct"), поэтому символьной
-    проверки тут нет — только границы строки (сам факт сдвига на ':'
-    проверяется геометрией CodeQL, символ перед позицией может быть любым,
-    включая пробел после ':'). has_block=0 (вход ФО) — символ перед позицией
-    либо '{' (обычное тело), либо ';' (явный super()/this() в конструкторе,
-    см. explicitCtorCall в probe_points.ql — вставка ставится сразу после
-    ЭТОГО оператора, который всегда заканчивается ';'). Если это не так —
-    позиция недостоверна (рассинхрон строки/колонки в данных CodeQL по
-    неизвестной пока причине), и лучше честно пропустить датчик (см.
-    dropped_sids), чем молча испортить синтаксис файла."""
+    """Геометрия из CodeQL иногда не попадает на границу токена (вставка
+    приходится внутрь имени метода/переменной, разрезая идентификатор
+    пополам). Открывающая вставка с has_block=1 (prio=0: вход ФО или ветвь
+    if/for/while/do/try/catch/else) всегда должна идти сразу после '{',
+    закрывающая (prio=1: выход ФО) — строго на месте '}' тела (см.
+    add_ins/ins_col в main: открытие — ins_col как 0-based индекс после '{',
+    закрытие — close_col-1 как 0-based индекс самого '}'). has_block=2
+    (case/default метка switch) — датчик ставится сразу после ':' без
+    обёртки в {} (см. instrument_cpp.py: op "direct"), поэтому символьной
+    проверки тут нет — только границы строки. has_block=0 (вход ФО) —
+    символ перед позицией либо '{' (обычное тело), либо ';' (явный
+    super()/this() в конструкторе, см. explicitCtorCall — вставка ставится
+    сразу после этого оператора). Если это не так — позиция недостоверна,
+    и лучше пропустить датчик (см. dropped_sids), чем испортить синтаксис."""
     if prio == 1:
         return eff < len(ln) and ln[eff] == "}"
     if has_block == 2:
@@ -295,17 +311,12 @@ def match_file_by_base(probe_path: str, by_base: dict):
     по СОВПАДЕНИЮ ХВОСТА пути, а не только по basename. by_base — индекс
     basename -> [(relpath_к_out, Path), ...] (см. main()).
 
-    Баг (реальный проект, gosjava): java/lang/CharacterData.java
-    (исключён из охвата фильтром извлечения) и
-    org/w3c/dom/CharacterData.java (обычный, входит в охват) — РАЗНЫЕ файлы
-    с ОДИНАКОВЫМ basename. Старый код при единственном кандидате по
-    basename возвращал его БЕЗ проверки пути — геометрия первого
-    (исключённого) файла применялась к случайному совпадению по имени
-    (второму, физически не связанному файлу), портя его на произвольных
-    байтовых позициях (внутрь javadoc, внутрь идентификаторов). Теперь
-    endswith-проверка обязательна ВСЕГДА, даже для единственного кандидата —
-    иначе вместо порчи чужого файла датчик просто не находит позицию (см.
-    add_ins в main(): fpath is None -> точка пропускается)."""
+    Два разных файла могут делить один basename (напр.
+    java/lang/CharacterData.java, исключённый фильтром извлечения, и
+    org/w3c/dom/CharacterData.java, обычный) — endswith-проверка обязательна
+    даже для единственного кандидата по basename, иначе геометрия одного
+    файла может применится к другому: лучше не найти позицию (см. add_ins в
+    main(): fpath is None -> точка пропускается), чем испортить чужой файл."""
     pp = probe_path.replace("\\", "/")
     cands = by_base.get(pp.rsplit("/", 1)[-1], [])
     best = None
@@ -356,10 +367,6 @@ def main():
     ap.add_argument("--no-syntax-check", action="store_true",
                     help="пропустить проверку javac (для Maven/Gradle — её роль выполнит сборка; "
                          "javac всех файлов сразу всё равно требует classpath/зависимости).")
-    ap.add_argument("--project-db", default="",
-                    help="Путь к project.db. Если задан — геометрия точек вставки "
-                         "берётся из сырых данных (раздел 'probe'), БЕЗ отдельного "
-                         "запроса probe_points.ql к CodeQL-БД.")
     ap.add_argument("--cqtrace-package", default="",
                     help="Java-пакет класса рантайма Cqtrace; ссылка везде <пакет>.Cqtrace.hit(). "
                          "По умолч. автоопределение берёт самый частый пакет — в БОЛЬШИХ проектах "
@@ -438,57 +445,30 @@ def main():
     br_num = read_branch_numbers(reports)
     print(f"[2] ФО: {len(fo_num)}, ветвей: {len(br_num)}")
 
-    # 3. Точки вставки — из сырых данных project.db, если передан, иначе
-    # свежим запросом probe_points.ql (fallback для standalone-режима).
-    # Раздел 'probe' может быть ПУСТ в project.db, собранном до того, как
-    # project_runner.py начал собирать его для языка "java" (миграция БД не
-    # переисполняет старые запросы сама) — раньше это давало 0 точек молча.
-    # Полная пересборка статики ради одного отсутствующего раздела — дорого
-    # (перезапуск ВСЕХ запросов на БД), а нужен только probe_points.ql, поэтому
-    # при пустом разделе откатываемся на лёгкий прямой запрос вместо отказа.
-    pts = []
-    source = ""
-    if args.project_db:
-        pts = read_probe_points_from_db(args.project_db)
-        if pts:
-            source = "из сырых данных project.db (раздел 'probe')"
-        else:
-            print("    Внимание: раздел 'probe' в project.db пуст (БД собрана "
-                  "до добавления этого языка в project_runner.py, или статика "
-                  "вообще не пересобиралась) — делаю прямой запрос probe_points.ql "
-                  "вместо отказа (дешевле полной пересборки статики).")
-    if not pts:
-        pts = run_probe_query(args.codeql, db_path,
-                              HERE.parent / "queries" / args.lang / "probe_points.ql",
-                              path_pattern=args.pattern or "%")
-        source = "запросом probe_points.ql" + ("" if args.project_db else " (standalone-режим)")
-    print(f"[3] Точек вставки: {len(pts)} ({source})")
+    # 3. Точки вставки — геометрия считана прямо в статике
+    # (functional_objects.ql/function_flow.ql/catch_points.ql). Читаем её из
+    # тех же CSV, из которых уже взяты fo_num/br_num выше — один источник
+    # истины.
+    pts = read_fo_geometry(reports) + read_branch_geometry(reports)
+    print(f"[3] Точек вставки: {len(pts)} (из отчётов статики)")
     pts = dedupe_probe_points(pts)
 
     all_java = list(out.rglob("*.java"))
     pkg = args.cqtrace_package or detect_package(all_java)
-    # ВАЖНО: ссылка на датчик — ПРОСТОЕ имя "Cqtrace.hit(...)", НЕ полный путь
-    # "<pkg>.Cqtrace.hit(...)". При полном пути ПЕРВЫЙ сегмент пакета (com,
-    # sun, se, spi, java, org — частые куски реальных имён) резолвится Java
-    # как обычное простое имя: если в зоне видимости есть локальная
-    # переменная/параметр/поле с ЭТИМ ЖЕ именем (своя частая история: "String
-    # com = ...", параметр "se", и т.п.), компилятор трактует "com.sun...." как
-    # доступ к полю на этой переменной, а не как путь пакета — гарантированная
-    # ошибка компиляции на ЛЮБОМ файле с таким совпадением (см. реальный кейс:
-    # ConstantSetNode.java — `String com = ...; if (com == null) {
-    # com.sun....hit(...)`). Простое имя класса такой проблемы не создаёт:
-    # 1) вызов метода `hit(...)` после import static резолвится Java ТОЛЬКО
-    # среди методов (отдельное пространство имён от переменных — JLS 6.5.5/
-    # 6.5.6) и переменной не подменяется НИКОГДА; 2) при простом доступе
-    # "Cqtrace.hit(...)" риск коллизии остаётся только с переменной, буквально
-    # названной "Cqtrace" — на практике не встречается (не словарное слово).
-    # Поэтому используем import + простое имя типа, а не import static:
-    # static-импорт рискует столкнуться с СОБСТВЕННЫМ методом класса по имени
-    # "hit" (member функции приоритетнее static-импорта при разрешении вызова
-    # без квалификатора), простое имя ТИПА — гораздо более редкая коллизия.
-    # Сам импорт вставляется в КАЖДЫЙ инструментированный файл отдельным
-    # проходом ниже (после применения вставок датчиков, чтобы не сдвигать
-    # номера строк, которыми оперирует probe_points.ql).
+    # Ссылка на датчик — простое имя "Cqtrace.hit(...)", не полный путь
+    # "<pkg>.Cqtrace.hit(...)". При полном пути первый сегмент пакета (com,
+    # sun, se, spi, java, org) резолвится Java как обычное простое имя: если
+    # в зоне видимости есть локальная переменная/параметр/поле с этим же
+    # именем, компилятор трактует "com.sun...." как доступ к полю на этой
+    # переменной, а не как путь пакета — ошибка компиляции. Простое имя
+    # класса такой проблемы не создаёт: вызов метода `hit(...)` резолвится
+    # Java только среди методов (отдельное пространство имён от переменных —
+    # JLS 6.5.5/6.5.6). Используем import + простое имя типа, а не import
+    # static: static-импорт рискует столкнуться с собственным методом класса
+    # по имени "hit" (member-функции приоритетнее static-импорта при
+    # разрешении вызова без квалификатора). Импорт вставляется в каждый
+    # инструментированный файл отдельным проходом ниже (после применения
+    # вставок датчиков, чтобы не сдвигать номера строк геометрии).
     ref = "Cqtrace"
     print(f"    Пакет Cqtrace: {pkg or '(default)'} → ссылка {ref}.hit(...) "
           f"(+ import {pkg}.Cqtrace; в каждый инструментированный файл)" if pkg
@@ -521,11 +501,20 @@ def main():
         ins.setdefault(fpath, []).append((line, eff_index, prio, text, sid, has_block)); touched.add(fpath)
 
     sid = 1
+    no_file_match = 0
     for pt in pts:
         if args.no_branches and pt["kind"] != "entry":
             continue  # отключена инструментация ветвей
         fpath = match_file(pt["file"])
-        if fpath is None: continue
+        if fpath is None:
+            # Точка геометрии указывает на файл, которого нет в --out (не
+            # извлечён вообще — отфильтрован --pattern/include-list/
+            # exclude-list/sensor-фильтром, или просто не нашёлся basename-
+            # резолвером). РАНЬШЕ эта потеря не попадала ни в `skipped`, ни в
+            # один лог — "[4] Датчиков (потенциально)" её не учитывал вовсе,
+            # хотя она часть общего разрыва между геометрией и итогом.
+            no_file_match += 1
+            continue
         base = fpath.relative_to(out).as_posix()
         fn = pt["func"]
         fo = _lookup_fo(fn, pt["file"], pt["ref_line"], fo_num)
@@ -537,9 +526,9 @@ def main():
             se, sx = sid, sid + 1; sid += 2
             # has_block=0: вход ФО — открывающая вставка ставится либо сразу
             # после '{' тела (обычный случай), либо сразу после super()/
-            # this() (явный вызов в конструкторе, см. explicitCtorCall в
-            # probe_points.ql) — там перед позицией ';', а не '{'. Оба случая
-            # легитимны для kind="entry", поэтому _insertion_is_valid
+            # this() (явный вызов в конструкторе, см. explicitCtorCall) —
+            # там перед позицией ';', а не '{'. Оба случая легитимны для
+            # kind="entry", поэтому _insertion_is_valid
             # принимает любой из двух символов (в отличие от has_block=1,
             # где ветвь однозначно начинается строго после '{').
             add_ins(fpath, pt["open_line"], pt["open_col"], 0, f" {ref}.hit({fo}, 0); try {{", se, has_block=0)
@@ -548,17 +537,16 @@ def main():
             sensor_map.append((se, fo, 0, base, pt["open_line"], "вход"))
             sensor_map.append((sx, fo, -1, base, pt["close_line"], "выход"))
         else:
-            bn = _lookup_br(fn, pt["ref_line"], pt["file"], br_num)
+            bn = _lookup_br(fn, pt["ref_line"], pt["file"], pt["open_col"], br_num)
             if bn is None:
                 skipped.append((fn, f"branch@{pt['ref_line']}", "ветви нет в Перечень_ветвей")); continue
             if pt["open_col"] <= 0:
                 skipped.append((fn, "branch", "нет позиции блока")); continue
             s = sid; sid += 1
             if pt.get("has_block") == 2:
-                # case/default: ins_col из probe_points.ql — 1-based позиция
-                # символа ПОСЛЕ ':' (см. has_block=2 там же); -1 переводит её
-                # в 0-based индекс этого символа (мирроринг instrument_cpp.py,
-                # op "direct" — там тот же сдвиг col-1 по той же причине).
+                # case/default: ins_col — 1-based позиция символа после ':';
+                # -1 переводит её в 0-based индекс (мирроринг instrument_cpp.py,
+                # op "direct").
                 add_ins(fpath, pt["open_line"], pt["open_col"] - 1, 0,
                         f" {ref}.hit({fo}, {bn});", s, has_block=2)
             else:
@@ -566,6 +554,10 @@ def main():
             sensor_map.append((s, fo, bn, base, pt["open_line"], pt["btype"]))
 
     print(f"[4] Датчиков (потенциально): {sid - 1} (пропущено точек: {len(skipped)})")
+    if no_file_match:
+        print(f"[3.1] Точек геометрии без файла в --out (не извлечён — "
+              f"--pattern/include-list/exclude-list/чёрный список датчиков, "
+              f"или basename не резолвится): {no_file_match}")
 
     for fp in touched:
         lines = fp.read_text(encoding="utf-8", errors="ignore").splitlines(keepends=True)
@@ -583,10 +575,10 @@ def main():
             lines[idx] = ln[:eff] + text + ln[eff:] + nl
         fp.write_text("".join(lines), encoding="utf-8")
 
-    # import <pkg>.Cqtrace; в КАЖДЫЙ инструментированный файл — отдельным
-    # проходом ПОСЛЕ применения вставок датчиков (строки/колонки выше — из
-    # probe_points.ql, привязаны к ИСХОДНОЙ нумерации строк; вставка лишней
-    # строки до этого момента сдвинула бы все последующие координаты).
+    # import <pkg>.Cqtrace; в каждый инструментированный файл — отдельным
+    # проходом после применения вставок датчиков (геометрия выше привязана
+    # к исходной нумерации строк; вставка лишней строки до этого момента
+    # сдвинула бы все последующие координаты).
     # Без пакета (default package) импорт не нужен и невозможен (классы
     # default package не импортируются) — там ref="Cqtrace" работает только
     # если вызывающий файл САМ в default package (см. ref/print выше).

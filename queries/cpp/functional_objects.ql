@@ -33,14 +33,44 @@ predicate isProjectFile(File file) {
   not file.getAbsolutePath().matches("%.ui%") and not file.getAbsolutePath().matches("%.._._%")
 }
 
+/**
+ * Геометрия вставки датчика входа/выхода тела функции.
+ *
+ * constexpr-функции остаются в Перечень_ФО, но не получают геометрию:
+ * __TRACE_FN() вызывает обычную (не constexpr) __trace_enter(), и вставка
+ * в constexpr-функцию даёт "call to non-constexpr function" и каскад
+ * ошибок по зависимым шаблонам.
+ */
+int insLine(Function f) {
+  exists(f.getBlock()) and not f.isConstexpr() and result = f.getBlock().getLocation().getStartLine()
+  or
+  (not exists(f.getBlock()) or f.isConstexpr()) and result = 0
+}
+
+int insCol(Function f) {
+  exists(f.getBlock()) and not f.isConstexpr() and result = f.getBlock().getLocation().getStartColumn()
+  or
+  (not exists(f.getBlock()) or f.isConstexpr()) and result = 0
+}
+
+int endLine(Function f) {
+  exists(f.getBlock()) and not f.isConstexpr() and result = f.getBlock().getLocation().getEndLine()
+  or
+  (not exists(f.getBlock()) or f.isConstexpr()) and result = 0
+}
+
+int endCol(Function f) {
+  exists(f.getBlock()) and not f.isConstexpr() and result = f.getBlock().getLocation().getEndColumn()
+  or
+  (not exists(f.getBlock()) or f.isConstexpr()) and result = 0
+}
+
 from Function f
 where isProjectFile(f.getFile())
   and f.hasDefinition()
   and not f.getName().indexOf("operator") = 0
-  // Функции, ЦЕЛИКОМ синтезированные макросом (напр. G_DEFINE_TYPE в GLib/GObject:
-  // get_type/class_intern_init/get_instance_private) — у них нет отдельного места
-  // в исходном файле (все делят одну строку вызова макроса), поэтому их нельзя
-  // ни показать как отдельный ФО, ни инструментировать для динамики (см. probe_points.ql).
+  // Функции, целиком синтезированные макросом (напр. G_DEFINE_TYPE в GLib/GObject) —
+  // нет отдельного места в исходнике (все делят строку вызова макроса).
   and not f.isInMacroExpansion()
   // Неявные (implicit) конструкторы/деструкторы — компилятор сам генерирует их
   // для класса/шаблона без явного кода программиста; реального места в файле
@@ -52,5 +82,7 @@ select
   getParentTypeName(f) as parent_type,
   f.getFile().getAbsolutePath() as file,
   f.getLocation().getStartLine() as line,
-  getFunctionKind(f) as kind
+  getFunctionKind(f) as kind,
+  insLine(f) as ins_line, insCol(f) as ins_col,
+  endLine(f) as end_line, endCol(f) as end_col
 order by file, line, qualified_name

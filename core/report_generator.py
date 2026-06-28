@@ -446,15 +446,24 @@ class ReportGenerator:
         def _declared(item):
             return f"{item.get('file', '')}({item.get('line', '')})" if item.get("file") else ""
 
-        # Шапка: №; объект; объявлен_в; число_использований
+        # Позиция вставки датчика входа/выхода (line:col) — считается прямо в
+        # functional_objects.ql (оба языка). Для старых project.db без этих
+        # колонок — пусто (см. RAW_SCHEMA в core/project_db.py).
+        def _geom(item, line_key, col_key):
+            ln, col = item.get(line_key, ""), item.get(col_key, "")
+            return f"{ln}:{col}" if ln and col else ""
+
+        # Шапка: №; объект; объявлен_в; число_использований; позиция входа; позиция выхода
         def fo_header_rows():
             for i, item in enumerate(data, 1):
                 callers = callers_map.get(item["qualified_name"], [])
-                yield [i, item["qualified_name"], _declared(item), len(callers)]
+                yield [i, item["qualified_name"], _declared(item), len(callers),
+                       _geom(item, "ins_line", "ins_col"), _geom(item, "end_line", "end_col")]
 
         self._write_csv_stream(
             "Перечень_ФО(процедур_функций).csv",
-            ["№ п/п", "Объект", "Объявлен в", "Число использований"],
+            ["№ п/п", "Объект", "Объявлен в", "Число использований",
+             "Позиция входа", "Позиция выхода"],
             fo_header_rows(),
         )
 
@@ -1405,6 +1414,17 @@ class ReportGenerator:
                     num = 0
             return num, name
 
+        # Позиция вставки датчика ветви (line:col) — считается прямо в
+        # function_flow.ql (java/cpp). catch — обычные строки этого же
+        # отчёта (Тип=catch, со своим номером ветви, не общим с try).
+        # "Блок" (has_block: 0 — одиночный оператор, 1 — тело в {}, 2 — case/
+        # default без {}) и "Позиция конца" — нужны cpp (макро-фоллбэк,
+        # обёртка одиночных операторов в instrument_cpp.py/instrument_c_make.py);
+        # для java/legacy — пусто/1.
+        def _geom(br, line_key, col_key):
+            ln, col = br.get(line_key, ""), br.get(col_key, "")
+            return f"{ln}:{col}" if ln and col else ""
+
         rows = []
         row_num = 1
         # Сортировка по номеру ФО, затем по номеру ветви
@@ -1421,13 +1441,18 @@ class ReportGenerator:
                     br["type"],
                     path,
                     br["line"],
+                    _geom(br, "ins_line", "ins_col"),
+                    br.get("has_block", ""),
+                    _geom(br, "end_line", "end_col"),
                 ])
                 row_num += 1
         self._write_csv(
             "Перечень_ветвей.csv",
-            ["№ п/п", "№ ФО", "ФО", "№ ветви", "Тип", "Файл", "Строка"],
+            ["№ п/п", "№ ФО", "ФО", "№ ветви", "Тип", "Файл", "Строка",
+             "Позиция вставки", "Блок", "Позиция конца"],
             rows,
         )
+
 
     def add_route_graph(self, route_edges: List[Dict], func_index: Dict[str, int] = None):
         """Сохранить граф маршрутов (функция, ветка)."""

@@ -1,5 +1,5 @@
 ﻿№ п/п;CWE;Категория ПОК;Сигнатура;Модуль;ФО;Местоположение;Фрагмент кода;Источник правила
-1;CWE-120;Переполнение буфера;strcpy;(20)/mnt/f/codeql-parser/examples/test-projects/small-projects/test-project-cpp-branches/unsafe_demo.cpp;(69)run_unsafe;/mnt/f/codeql-parser/examples/test-projects/small-projects/test-project-cpp-branches/unsafe_demo.cpp:9;;cpp-queries
-2;CWE-120;Переполнение буфера;sprintf;(20)/mnt/f/codeql-parser/examples/test-projects/small-projects/test-project-cpp-branches/unsafe_demo.cpp;(69)run_unsafe;/mnt/f/codeql-parser/examples/test-projects/small-projects/test-project-cpp-branches/unsafe_demo.cpp:11;;cpp-queries
-3;CWE-078;Внедрение команд ОС;system;(20)/mnt/f/codeql-parser/examples/test-projects/small-projects/test-project-cpp-branches/unsafe_demo.cpp;(69)run_unsafe;/mnt/f/codeql-parser/examples/test-projects/small-projects/test-project-cpp-branches/unsafe_demo.cpp:12;;cpp-queries
-4;CWE-134;Форматная строка;printf;(20)/mnt/f/codeql-parser/examples/test-projects/small-projects/test-project-cpp-branches/unsafe_demo.cpp;(69)run_unsafe;/mnt/f/codeql-parser/examples/test-projects/small-projects/test-project-cpp-branches/unsafe_demo.cpp:13;;cpp-queries
+1;CWE-120;Переполнение буфера;strcpy;(20)unsafe_demo.cpp;(69)run_unsafe;unsafe_demo.cpp:9;;cpp-queries
+2;CWE-120;Переполнение буфера;sprintf;(20)unsafe_demo.cpp;(69)run_unsafe;unsafe_demo.cpp:11;;cpp-queries
+3;CWE-078;Внедрение команд ОС;system;(20)unsafe_demo.cpp;(69)run_unsafe;unsafe_demo.cpp:12;;cpp-queries
+4;CWE-134;Форматная строка;printf;(20)unsafe_demo.cpp;(69)run_unsafe;unsafe_demo.cpp:13;;cpp-queries

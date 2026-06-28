@@ -18,11 +18,13 @@ QUERY_MAP: Dict[str, str] = {
     "file_flow":  "file_flow.ql",
     "signature":  "signature_analysis.ql",
     "flow":       "function_flow.ql",
-    # Геометрия точек вставки датчиков (вход/выход ФО + ветви) для динамической
-    # инструментации. Собирается в составе сырых данных статики и сохраняется в
-    # project.db (раздел "probe"), чтобы инструментатор НЕ делал отдельный запрос
-    # к БД, а брал геометрию из сырых данных (см. instrument_cpp.py).
-    "probe":      "probe_points.ql",
+    # Геометрия точек вставки датчиков (вход/выход ФО + ветви) для обоих
+    # языков (java/cpp) считается прямо в functional_objects.ql/
+    # function_flow.ql. Единственный осколок, который туда не уместился —
+    # геометрия catch (try может иметь несколько catch-клауз, не выражается
+    # одной колонкой на строке try) — вынесена в catch_points.ql (свой файл
+    # на каждый язык).
+    "catch":      "catch_points.ql",
 }
 
 # Приоритет stmt_type при дедупликации flow по (func_name[, func_file], stmt_id)
@@ -83,11 +85,9 @@ class CodeQLAnalyzer:
         self.codeql = _find_codeql(codeql_path)
         self.language = language
         self.ram_mb = ram_mb
-        # Пустой паттерн = «взять все файлы проекта» (matches("%")).
-        # ВАЖНО: раньше тут подставлялся дефолт %test-project-<lang>%, из-за чего
-        # на реальных проектах (пути не содержат "test-project-...") получалось 0 ФО,
-        # хотя БД корректна. Теперь пусто = % (без фильтра), а для точного отбора
-        # пользователь задаёт свою маску через --pattern / поле Pattern в GUI.
+        # Пустой паттерн = «взять все файлы проекта» (matches("%")); для
+        # точного отбора пользователь задаёт свою маску через --pattern /
+        # поле Pattern в GUI.
         self.path_pattern = path_pattern.strip() if path_pattern.strip() else "%"
         # Запросы разложены по языкам: queries/<lang>/*.ql
         self.queries_dir = PROJECT_ROOT / "queries" / language
@@ -121,9 +121,8 @@ class CodeQLAnalyzer:
             query_content = query_content.replace("${PROJECT_PATTERN}", effective_pattern)
             # Сохраняем в исходной папке с префиксом, чтобы работал qlpack.yml.
             # Имя должно заканчиваться на .ql для CodeQL. PID в имени исключает
-            # гонку между параллельными анализами разных проектов (раньше два
-            # процесса с разными паттернами перезаписывали один и тот же файл —
-            # один из них молча выполнял запрос с чужим фильтром).
+            # гонку между параллельными анализами разных проектов с разными
+            # паттернами (иначе они бы перезаписывали один и тот же файл).
             name_without_ext = query_file[:-3]  # убираем .ql
             temp_query = self.queries_dir / f".{name_without_ext}.{os.getpid()}.ql"
             temp_query.write_text(query_content, encoding="utf-8")

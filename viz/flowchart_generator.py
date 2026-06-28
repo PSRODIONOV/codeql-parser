@@ -424,6 +424,10 @@ class FlowchartGenerator:
                 "branch_type": s.get("branch_type", ""),
                 "else_line": int(s.get("else_line", "0") or 0),
                 "branch_num": s.get("branch_num"),
+                # Свои номера ветвей для исхода "нет"/"catch" — не общие с
+                # родителем if/try (см. _outcome_branch_num).
+                "else_branch_num": s.get("else_branch_num"),
+                "catch_branch_nums": s.get("catch_branch_nums") or [],
                 "callee_num":  s.get("callee_num"),
                 "in_catch": int(s.get("in_catch", "0") or 0),
                 "children": [],
@@ -431,9 +435,8 @@ class FlowchartGenerator:
             })
 
         # Для try-узлов: расширить line_end, чтобы включить операторы ИХ catch-блока.
-        # Catch-узел относим к ближайшему предшествующему try по строке начала —
-        # раньше каждый try растягивался до самого дальнего catch ВСЕЙ функции,
-        # из-за чего при нескольких try ломалась иерархия вложенности.
+        # Catch-узел относим к ближайшему предшествующему try по строке начала
+        # — иначе при нескольких try в одной функции иерархия вложенности ломается.
         try_nodes = sorted((n for n in nodes if n["stmt_type"] == "try"),
                            key=lambda n: n["line_start"])
         if try_nodes:
@@ -595,10 +598,8 @@ class FlowchartGenerator:
 
             # Продолжение после if: следующий sibling-оператор, иначе возврат к
             # заголовку цикла, иначе выход. next_sibling приоритетнее loop_back:
-            # ветка «нет» и хвост ветки «да» должны идти к СЛЕДУЮЩЕМУ оператору
-            # последовательности, а не сразу к концу функции/заголовку цикла
-            # (раньше нетерминальная ветка «да» уходила прямо в «Конец», минуя
-            # последующие операторы).
+            # ветка «нет» и хвост ветки «да» должны идти к следующему оператору
+            # последовательности, а не сразу к концу функции/заголовку цикла.
             false_target = next_sibling_id or loop_back_id or exit_node
 
             # merge нужен только если есть else_children (нужно объединить ветки)
@@ -967,6 +968,20 @@ class FlowchartGenerator:
 
 
     @staticmethod
+    def _outcome_branch_num(node, outcome):
+        """Номер ветви для конкретного исхода — у if/try исходы "нет"/"catch"
+        физически разные позиции датчика, со своим номером (else_branch_num/
+        catch_branch_nums, см. нумерацию в generate_all) — не общий
+        branch_num узла."""
+        st = node["stmt_type"]
+        if st == "if" and outcome == "нет":
+            return node.get("else_branch_num") or node.get("branch_num")
+        if st == "try" and outcome == "catch":
+            nums = [bn for bn, _ in node.get("catch_branch_nums", [])]
+            return nums[0] if nums else node.get("branch_num")
+        return node.get("branch_num")
+
+    @staticmethod
     def _decision_outcomes(node) -> "Optional[tuple]":
         """Ключ решения и его два исхода, либо None для не-ветвлений."""
         st = node["stmt_type"]; b = node.get("branch_num")
@@ -1143,11 +1158,14 @@ class FlowchartGenerator:
                             # базовый выбор: первая ветвь, доходящая до конца
                             ft = [a for a in arms if self._seq_falls_through(a[1], ft_memo)]
                             chosen = (ft or arms)[0]
-                    # Сам switch как условие НЕ пишем (у него нет номера ветви) —
+                    # Сам switch как условие не пишем (у него нет номера ветви) —
                     # записываются пройденные метки case/default (ниже), как и в
-                    # фактической трассе. Для прочих ветвлений пишем исход.
+                    # фактической трассе. Для прочих ветвлений пишем исход — с
+                    # номером именно этого исхода (_outcome_branch_num), а не
+                    # общим номером узла (if/else, try/catch получают раздельные
+                    # номера).
                     if key[0] != "switch":
-                        conds.append((key[0], key[1], chosen[0]))
+                        conds.append((key[0], self._outcome_branch_num(node, chosen[0]), chosen[0]))
                     covered.add((key, chosen[0]))
                     nodes = chosen[1] + rest
                     continue
@@ -1203,11 +1221,12 @@ class FlowchartGenerator:
         def outcomes(node):
             st = node["stmt_type"]; b = node.get("branch_num")
             if st == "if":
-                return (f"if#{b}-да", f"if#{b}-нет")
+                return (f"if#{b}-да", f"if#{self._outcome_branch_num(node, 'нет')}-нет")
             if st in ("for", "while", "do"):
                 return (f"{st}#{b}-да", f"{st}#{b}-нет")
             if st == "try":
-                return (f"try#{b}-нет исключения", f"try#{b}-catch")
+                return (f"try#{b}-нет исключения",
+                        f"try#{self._outcome_branch_num(node, 'catch')}-catch")
             return None
 
         def split_children(node):
@@ -1293,6 +1312,7 @@ class FlowchartGenerator:
         control_data: List[Dict[str, str]],
         data_data: List[Dict[str, str]] = None,
         file_flow_data: List[Dict[str, str]] = None,
+        catch_data: List[Dict[str, str]] = None,
         route_writer=None,
         load_by_demand: bool = False,
         build_flowcharts: bool = True,
@@ -1350,6 +1370,19 @@ class FlowchartGenerator:
         if data_data:
             for item in data_data:
                 accesses_by_func[item.get("function_name", "")].append(item)
+
+        # Геометрия catch (queries/<lang>/catch_points.ql) по (func, ref_line=
+        # строка try) — try может иметь несколько catch-клауз, каждая получает
+        # свой номер ветви.
+        catches_by_func: Dict[str, Dict[int, list]] = defaultdict(lambda: defaultdict(list))
+        if catch_data:
+            for item in catch_data:
+                try:
+                    ref_line = int(item.get("ref_line", "0") or 0)
+                except (ValueError, TypeError):
+                    continue
+                if ref_line:
+                    catches_by_func[item.get("func", "")][ref_line].append(item)
         print(f"[DEBUG:generate_all] Группировка готова: stmts={len(stmts_by_func)} "
               f"calls={len(calls_by_func)} accesses={len(accesses_by_func)} функций", flush=True)
 
@@ -1456,6 +1489,7 @@ class FlowchartGenerator:
                 calls = calls_by_name.get(func_name, [])
             accesses = accesses_by_func.get(func_name, [])
             file_ios = file_io_by_func.get(func_name, [])
+            catches_by_ref_line = catches_by_func.get(func_name, {})
 
             filtered: List[Dict[str, Any]] = []
             occupied_lines = set()
@@ -1551,6 +1585,9 @@ class FlowchartGenerator:
                     # границ ветвей switch; нужны в filtered только чтобы
                     # _build_hierarchy включил их в children switch для
                     # партиционирования (см. _render_node, stmt_type == "switch").
+                    # ins_line/ins_col/has_block — геометрия вставки датчика
+                    # (см. queries/java/function_flow.ql) — нужна ниже, в
+                    # branch_inventory_by_func (Перечень_ветвей.csv).
                     line = _line_of(s)
                     st = s.get("stmt_type", "")
                     filtered.append({
@@ -1560,6 +1597,9 @@ class FlowchartGenerator:
                         "stmt_type": st,
                         "stmt_label": s.get("stmt_label", st),
                         "branch_type": "",
+                        "ins_line": s.get("ins_line", "0"),
+                        "ins_col": s.get("ins_col", "0"),
+                        "has_block": s.get("has_block", "0"),
                     })
                     occupied_lines.add(line)
 
@@ -1769,15 +1809,36 @@ class FlowchartGenerator:
                 _gi = _gj + 1
 
             # Нумерация узлов-ветвлений (#1, #2, ...) в порядке строки кода.
-            # "switch" сюда НЕ входит (как и "if" не нумерует себя отдельно
-            # от "else") — нумеруются сами ветви: case/default, симметрично
-            # probe_points.ql, где датчик ставится на каждую case/default
-            # метку, а не на сам switch.
+            # "switch" сюда не входит (как и "if" не нумерует себя отдельно
+            # от "else") — нумеруются сами ветви: case/default, поскольку
+            # датчик ставится на каждую case/default метку, а не на switch.
             branch_counter = 0
             for node in sorted(filtered, key=lambda x: int(x.get("line_start", 0) or 0)):
                 if node["stmt_type"] in ("if", "else", "while", "for", "do", "try", "case", "default"):
                     branch_counter += 1
                     node["branch_num"] = branch_counter
+
+            # else/catch получают свой номер ветви, продолжающий ту же
+            # последовательность — не делят номер с if/try: физически
+            # разные позиции датчика должны давать разные (fo, br), иначе
+            # покрытие/маршруты не отличат, что реально выполнилось.
+            _if_lines_early = {int(x.get("line_start", x.get("line", 0)) or 0)
+                                for x in filtered if x.get("stmt_type") == "if"}
+            for node in sorted(filtered, key=lambda x: int(x.get("line_start", 0) or 0)):
+                st = node.get("stmt_type", "")
+                if st == "if":
+                    el = int(node.get("else_line", "0") or 0)
+                    ln = int(node.get("line_start", node.get("line", 0)) or 0)
+                    is_else_if = el > 0 and el != ln and el in _if_lines_early
+                    if el > 0 and not is_else_if:      # плоский else
+                        branch_counter += 1
+                        node["else_branch_num"] = branch_counter
+                elif st == "try":
+                    ln = int(node.get("line_start", node.get("line", 0)) or 0)
+                    for cc in catches_by_ref_line.get(ln, []):
+                        branch_counter += 1
+                        node.setdefault("catch_branch_nums", []).append(
+                            (branch_counter, cc))
 
             # Маршруты/ветви считаем отдельной фазой ПОСЛЕ SVG — здесь только
             # запоминаем подготовленную иерархию операторов данного ФО.
@@ -1919,11 +1980,16 @@ class FlowchartGenerator:
                 routes_by_func[_fkey] = _routes
                 # Полный граф переходов между ветками — структурно, без кэпа.
                 branch_edges_by_func[_fkey] = self._branch_transitions(_hier)
-                # Инвентарь ветвей #N (с позицией) для Перечень_ветвей.csv
+                # Инвентарь ветвей #N (с позицией) для Перечень_ветвей.csv.
+                # ins_line/ins_col/has_block — геометрия вставки датчика,
+                # считается прямо в function_flow.ql.
                 branch_inventory_by_func[_fkey] = [
                     {"num": n["branch_num"], "type": n["stmt_type"],
                      "line": n.get("line_start", n.get("line", 0)),
-                     "line_end": n.get("line_end", n.get("line_start", n.get("line", 0)))}
+                     "line_end": n.get("line_end", n.get("line_start", n.get("line", 0))),
+                     "ins_line": n.get("ins_line", "0"), "ins_col": n.get("ins_col", "0"),
+                     "has_block": n.get("has_block", ""),
+                     "end_line": n.get("end_line", "0"), "end_col": n.get("end_col", "0")}
                     for n in sorted(_filt, key=lambda x: int(x.get("branch_num") or 0))
                     if n.get("branch_num")
                 ]
@@ -1947,12 +2013,45 @@ class FlowchartGenerator:
                         _is_else_if = _el > 0 and _el != _ln and _el in _if_lines
                         if _el > 0 and not _is_else_if:        # плоский else
                             _else_entries.append({
-                                "num": n.get("branch_num"),
+                                # Свой номер (else_branch_num), не branch_num
+                                # родителя if.
+                                "num": n.get("else_branch_num"),
                                 "type": "else",
                                 "line": _el,
                                 "line_end": int(n.get("else_line_end", "0") or 0),
+                                # else_ins_line/else_ins_col — side-channel на
+                                # if-строке function_flow.ql: else, как и сам
+                                # else, не отдельный Stmt у CodeQL, поэтому не
+                                # может быть обычной колонкой ins_line/ins_col
+                                # самого if-узла.
+                                "ins_line": n.get("else_ins_line", "0"),
+                                "ins_col": n.get("else_ins_col", "0"),
+                                "has_block": n.get("else_has_block", ""),
+                                "end_line": n.get("else_end_line", "0"),
+                                "end_col": n.get("else_end_col", "0"),
                             })
                 branch_inventory_by_func[_fkey].extend(_else_entries)
+                # catch — по одной записи на КАЖДУЮ catch-клаузу, со СВОИМ
+                # номером (try может иметь несколько catch — общий номер с
+                # try создавал ту же неразличимость, что у if/else выше; см.
+                # queries/java/catch_points.ql, node["catch_branch_nums"]
+                # заполняется в цикле нумерации выше).
+                _catch_entries = []
+                for n in _filt:
+                    if n.get("stmt_type") != "try":
+                        continue
+                    for bn, cc in n.get("catch_branch_nums", []):
+                        _catch_entries.append({
+                            "num": bn, "type": "catch",
+                            "line": cc.get("ins_line", 0),
+                            "line_end": cc.get("ins_line", 0),
+                            "ins_line": cc.get("ins_line", "0"),
+                            "ins_col": cc.get("ins_col", "0"),
+                            "has_block": 1,
+                            "end_line": cc.get("end_line", "0"),
+                            "end_col": cc.get("end_col", "0"),
+                        })
+                branch_inventory_by_func[_fkey].extend(_catch_entries)
         if log:
             log(f"[МАРШРУТЫ] готово: {_nroutes_total} для {_nri} ФО "
                 f"(за {time.time() - _t_routes:.1f} с)")

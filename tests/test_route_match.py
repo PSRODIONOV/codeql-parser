@@ -45,9 +45,10 @@ class TestBranchSig:
                  "for #1 -да->while #2 -да->Конец")
         assert _branch_sig(route) == (1, 2)
 
-    def test_else_outcome_not_instrumented(self):
-        """else (-нет / тело else) не входит в сигнатуру — датчик на «да»-стороне."""
-        assert _branch_sig("if #1 -нет->Конец") == ()
+    def test_else_outcome_now_instrumented_with_own_number(self):
+        """"нет" (else) входит в сигнатуру со своим номером, отличным от
+        номера if — у else свой датчик, не общий с if."""
+        assert _branch_sig("if #2 -нет->Конец") == (2,)
         assert _branch_sig("if #1 -да->Конец") == (1,)
 
     def test_switch_case_route_in_sig(self):
@@ -60,7 +61,7 @@ class TestBranchSig:
 class TestIsInstrumented:
 
     @pytest.mark.parametrize("btype,outcome,exp", [
-        ("if", "да", True), ("if", "нет", False),
+        ("if", "да", True), ("if", "нет", True),  # см. test_else_outcome_now_instrumented_with_own_number
         ("for", "да", True), ("while", "нет", False),
         ("try", "catch", True), ("try", "нет исключения", True),
         ("case", "да", True), ("default", "да", True),

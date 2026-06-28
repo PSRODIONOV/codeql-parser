@@ -64,10 +64,17 @@ int main() {
 
     // ---- oneline_demo (заголовок и тело на одной строке) ----
     std::cout << "if_oneline_nobrace   = " << if_oneline_nobrace(5) << "\n";
+    // вызов с обеими чётностями — ветви #1 (if) и #2 (else) теперь со своим
+    // номером (см. историю про точность покрытия if/else): один вызов
+    // покрывал бы только одну из двух физически разных позиций.
     std::cout << "if_else_oneline_nn   = " << if_else_oneline_nn(8) << "\n";
+    std::cout << "if_else_oneline_nn(5)= " << if_else_oneline_nn(5) << "\n";
     std::cout << "if_else_oneline_bb   = " << if_else_oneline_bb(8) << "\n";
+    std::cout << "if_else_oneline_bb(5)= " << if_else_oneline_bb(5) << "\n";
     std::cout << "if_else_oneline_nb   = " << if_else_oneline_nb(5) << "\n";
+    std::cout << "if_else_oneline_nb(8)= " << if_else_oneline_nb(8) << "\n";
     std::cout << "if_else_oneline_bn   = " << if_else_oneline_bn(5) << "\n";
+    std::cout << "if_else_oneline_bn(8)= " << if_else_oneline_bn(8) << "\n";
     std::cout << "for_oneline_nobrace  = " << for_oneline_nobrace(10) << "\n";
     std::cout << "while_oneline_nobrace= " << while_oneline_nobrace(64) << "\n";
     std::cout << "do_oneline_nobrace   = " << do_oneline_nobrace(4) << "\n";

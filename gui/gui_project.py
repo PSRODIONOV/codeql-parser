@@ -1417,11 +1417,10 @@ class DynamicTab(QWidget):
                    "--codeql", _codeql(), "--lang", lang,
                    "--trace-tag", trace_tag,
                    "--pattern", meta.get("pattern", "")]
-            # Геометрия точек вставки — из сырых данных project.db (раздел
-            # 'probe'), без отдельного запроса probe_points.ql к CodeQL-БД.
-            # instrument_c_make.py — свой рантайм, эту опцию не принимает.
-            if script in ("instrument_cpp.py", "instrument_java.py"):
-                cmd += ["--project-db", str(self.proj.db_path)]
+            # Геометрия точек вставки (вход/выход ФО, ветви, catch) для всех
+            # языков/инструментаторов считается прямо в статике
+            # (Перечень_ФО/Перечень_ветвей.csv) — ни один из них не
+            # принимает --project-db и не делает отдельный запрос к CodeQL-БД.
             flt = self.proj.get_file_filters()
             if flt.get("include_list"):
                 p = self.proj.root / "work" / "include_list.txt"

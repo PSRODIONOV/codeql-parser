@@ -7,7 +7,11 @@
   - в начало каждой ветви (по Перечень_ветвей) — номер ветви #N.
 
 Нумерация ФО и ветвей берётся ИЗ статических отчётов, поэтому совпадает со
-статикой 1:1. Перед завершением выполняется проверка синтаксиса (g++ -fsyntax-only);
+статикой 1:1. Геометрия вставки (позиция входа/выхода ФО, позиция ветви,
+включая catch — обычные строки Перечень_ветвей.csv со своим номером) тоже
+читается из отчётов статики (Перечень_ФО/Перечень_ветвей.csv), считается
+в queries/cpp/functional_objects.ql/function_flow.ql/catch_points.ql.
+Перед завершением выполняется проверка синтаксиса (g++ -fsyntax-only);
 ошибки выводятся в Отчёт_об_ошибках_вставки.csv для ручного исправления.
 
 Дерево исходников отдельно передавать не нужно — оно извлекается прямо из
@@ -18,7 +22,7 @@ src.zip внутри CodeQL БД (см. core/file_lists.py).
       --out <рабочая-копия> [--codeql codeql] [--lang cpp]
       [--include-list files.txt] [--exclude-list files.txt]
 """
-import argparse, tempfile, csv, os, re, shutil, subprocess, sys
+import argparse, csv, os, re, shutil, subprocess, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -48,13 +52,14 @@ sys.path.insert(0, str(HERE))
 from _instrument_common import sids_in_text as _sids_in_text  # noqa: E402
 from _instrument_common import first_real_brace as _first_real_brace  # noqa: E402
 from _instrument_common import is_reliable_stmt_end as _is_reliable_stmt_end  # noqa: E402
+from _instrument_common import read_fo_geometry, read_branch_geometry  # noqa: E402
 
 
 def read_fo_numbers(reports_dir: Path):
     """Перечень_ФО → {qualified_name: [(fo_num, file, line), ...]} — СПИСОК,
     а не один номер: разные функции (в разных файлах — static-тёзки,
     перегрузки) могут иметь одинаковый qualified_name. См. _lookup_fo —
-    дисамбигуация по файлу из probe_points.ql."""
+    дисамбигуация по файлу."""
     fo = {}
     p = reports_dir / "Перечень_ФО(процедур_функций).csv"
     with open(p, encoding="utf-8-sig") as fh:
@@ -67,84 +72,26 @@ def read_fo_numbers(reports_dir: Path):
 
 
 def read_branch_numbers(reports_dir: Path):
-    """Перечень_ветвей → {(qualified_name, line): [(branch_num, file), ...]}."""
+    """Перечень_ветвей → {(qualified_name, line): [(branch_num, file, ins_col), ...]}.
+    ins_col (колонка из "Позиция вставки") — дисамбигуация if/else
+    ОДНОСТРОЧНОЙ формы (`if (x) a(); else b();`): у обоих одна "Строка" в
+    отчёте, различаются только колонкой вставки (см. _pick_by_branch)."""
     br = {}
     p = reports_dir / "Перечень_ветвей.csv"
     with open(p, encoding="utf-8-sig") as fh:
         for row in list(csv.reader(fh, delimiter=";"))[1:]:
-            # № п/п, № ФО, ФО, № ветви, Тип, Файл, Строка
+            # № п/п, № ФО, ФО, № ветви, Тип, Файл, Строка, Позиция вставки
             if len(row) >= 7 and row[2].strip() and row[6].strip():
                 key = (row[2].strip(), int(row[6]))
                 file = row[5].strip() if len(row) > 5 and row[5].strip() else None
-                br.setdefault(key, []).append((int(row[3]), file))
+                ins_col = None
+                if len(row) > 7 and ":" in row[7]:
+                    try:
+                        ins_col = int(row[7].rsplit(":", 1)[1])
+                    except ValueError:
+                        pass
+                br.setdefault(key, []).append((int(row[3]), file, ins_col))
     return br
-
-
-def run_probe_query(codeql: str, db: Path, query: Path, path_pattern: str = "%"):
-    """Запускает probe_points.ql, возвращает список словарей-точек."""
-    content = query.read_text(encoding="utf-8")
-    if "${PROJECT_PATTERN}" in content:
-        tmp = query.parent / f".{query.name}"
-        tmp.write_text(content.replace("${PROJECT_PATTERN}", path_pattern or "%"), encoding="utf-8")
-        query_to_run = tmp
-    else:
-        query_to_run = query
-    bqrs = Path(tempfile.gettempdir(), "probe_points.bqrs")
-    csvp = Path(tempfile.gettempdir(), "probe_points.csv")
-    subprocess.run([codeql, "query", "run", f"--database={db}",
-                    f"--output={bqrs}", str(query_to_run)], check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    with open(csvp, "w") as out:
-        subprocess.run([codeql, "bqrs", "decode", "--format=csv", str(bqrs)],
-                       check=True, stdout=out, stderr=subprocess.DEVNULL)
-    pts = []
-    with open(csvp, encoding="utf-8") as fh:
-        r = csv.reader(fh)
-        next(r, None)
-        for row in r:
-            if len(row) < 8:
-                continue
-            pts.append({
-                "kind":      row[0], "func": row[1], "file": row[2],
-                "ref_line":  int(row[3]), "ins_line": int(row[4]),
-                "ins_col":   int(row[5]), "has_block": int(row[6]), "btype": row[7],
-                "end_line":  int(row[8]) if len(row) > 8 else 0,
-                "end_col":   int(row[9]) if len(row) > 9 else 0,
-            })
-    return pts
-
-
-def read_probe_points_from_db(project_db_path: str):
-    """Читает геометрию точек вставки из СЫРЫХ ДАННЫХ project.db (раздел 'probe',
-    собранный на этапе статики через probe_points.ql) и возвращает тот же формат,
-    что и run_probe_query — но БЕЗ отдельного запроса к CodeQL-БД. Это и есть
-    путь «всё берётся из сырых данных»: инструментатор ничего не запрашивает."""
-    import sys as _sys
-    _sys.path.insert(0, str(HERE.parent))
-    from core.project_db import ProjectDB
-
-    def _i(v):
-        try:
-            return int(v)
-        except (ValueError, TypeError):
-            return 0
-
-    proj = ProjectDB.open(project_db_path)
-    try:
-        rows = proj.load_raw_data().get("probe", [])
-    finally:
-        proj.close()
-    pts = []
-    for r in rows:
-        pts.append({
-            "kind": r.get("kind", ""), "func": r.get("func", ""),
-            "file": r.get("file", ""),
-            "ref_line": _i(r.get("ref_line")), "ins_line": _i(r.get("ins_line")),
-            "ins_col": _i(r.get("ins_col")), "has_block": _i(r.get("has_block")),
-            "btype": r.get("btype", ""),
-            "end_line": _i(r.get("end_line")), "end_col": _i(r.get("end_col")),
-        })
-    return pts
 
 
 def _strip_tpl(name: str) -> str:
@@ -172,7 +119,7 @@ def _pick_by_file(cands, file, line=None):
     функций) — сперва файл+строка точно (различает перегрузки в ОДНОМ
     файле, напр. 'emit_opcode' на разных строках ad_x86_64.cpp), затем
     только файл (различает static-тёзки в разных файлах); если совпадения
-    нет вовсе — берётся первый, как раньше."""
+    нет вовсе — берётся первый кандидат."""
     if not cands:
         return None
     if len(cands) == 1:
@@ -211,13 +158,35 @@ def _short_name(qualified_name: str) -> str:
     return _strip_tpl(qualified_name).rsplit("::", 1)[-1]
 
 
-def _lookup_br(fn: str, ref_line: int, file: str, br_num: dict) -> int | None:
+def _pick_by_branch(cands, file, ins_col):
+    """cands — список (номер_ветви, файл, ins_col) для одного (имя, строка).
+    Сначала точное совпадение колонки вставки — различает if/else
+    ОДНОСТРОЧНОЙ формы (`if (x) a(); else b();`): у обоих одна "Строка", но
+    разные ins_col (см. read_branch_numbers). Затем — только файл (коллизия
+    у разных функций на той же строке); если совпадения нет — первый
+    кандидат."""
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0][0]
+    if ins_col:
+        for num, cfile, ccol in cands:
+            if ccol == ins_col and (not file or not cfile or _file_matches(cfile, file)):
+                return num
+    if file:
+        for num, cfile, _ in cands:
+            if _file_matches(cfile, file):
+                return num
+    return cands[0][0]
+
+
+def _lookup_br(fn: str, ref_line: int, file: str, ins_col, br_num: dict) -> int | None:
     """Ищет номер ветви точно, затем со сдвигом ±1/±2 строки; дисамбигуация
-    по файлу при коллизии (имя, строка) у разных функций."""
+    по колонке вставки/файлу при коллизии (имя, строка)."""
     for d in (0, 1, -1, 2, -2):
         cands = br_num.get((fn, ref_line + d))
         if cands:
-            return _pick_by_file(cands, file)
+            return _pick_by_branch(cands, file, ins_col)
     return None
 
 
@@ -281,10 +250,6 @@ def main():
     ap.add_argument("--exclude-list", default="", help="Текстовый файл — чёрный список путей (по одному на строку)")
     ap.add_argument("--no-branches", action="store_true",
                     help="инструментировать только вход/выход ФО, без датчиков ветвей")
-    ap.add_argument("--project-db", default="",
-                    help="Путь к project.db. Если задан — геометрия точек вставки "
-                         "берётся из сырых данных (раздел 'probe'), БЕЗ отдельного "
-                         "запроса probe_points.ql к CodeQL-БД.")
     ap.add_argument("--sensor-include-list", default="",
                     help="Текстовый файл — белый список шаблонов/путей ВСТАВКИ ДАТЧИКОВ "
                          "(по одному на строку, см. core/file_lists.py). Доп. к --pattern/ "
@@ -360,26 +325,18 @@ def main():
     print(f"[2] ФО из статики: {fo_total} (уникальных имён: {len(fo_num)}), "
           f"ветвей: {br_total} (уникальных пар имя/строка: {len(br_num)})")
 
-    # 3. Точки вставки. Основной путь — из СЫРЫХ ДАННЫХ project.db (раздел
-    #    'probe', собранный статикой): инструментатор НЕ делает отдельный запрос.
-    #    Запрос probe_points.ql остаётся только как fallback для standalone-режима
-    #    (analyze_project.py/CLI), где project.db нет.
-    if args.project_db:
-        pts = read_probe_points_from_db(args.project_db)
-        print(f"[3] Геометрия точек вставки: из сырых данных project.db "
-              f"(раздел 'probe', без отдельного запроса)")
-    else:
-        pts = run_probe_query(args.codeql, db_path,
-                              HERE.parent / "queries" / args.lang / "probe_points.ql",
-                              path_pattern=args.pattern or "%")
-        print(f"[3] Геометрия точек вставки: запросом probe_points.ql "
-              f"(project.db не передан — standalone-режим)")
+    # 3. Точки вставки — геометрия считана прямо в статике
+    # (functional_objects.ql/function_flow.ql/catch_points.ql). Читаем её из
+    # тех же CSV, из которых уже взяты fo_num/br_num выше — один источник
+    # истины (мирроринг instrument_java.py).
+    pts = read_fo_geometry(reports) + read_branch_geometry(reports)
+    print(f"[3] Точек вставки: {len(pts)} (из отчётов статики)")
     n_before_dedup = len(pts)
     pts = _dedup_by_position(pts)
     print(f"[3] Точек вставки из CodeQL: {n_before_dedup} "
           f"(после дедупликации шаблонных инстанциаций по позиции: {len(pts)})")
 
-    # 4. Готовим вставки. Те же расширения, что в isProjectFile probe_points.ql/
+    # 4. Готовим вставки. Те же расширения, что в isProjectFile
     # functional_objects.ql (включая заголовки — там нередки инлайн-функции
     # с телом, напр. геттеры/сеттеры). Без .h/.hpp здесь такие точки молча
     # пропускались бы, а сами заголовки удалялись бы ниже как непроинструментированные.
@@ -409,12 +366,18 @@ def main():
     # add_via_macro в test-project-cpp-branches).
     dropped_sids = set()
     skipped = []
+    no_file_match = 0
     sid = 1
     for pt in sorted(pts, key=lambda x: (x["file"], x["ins_line"], x["ins_col"])):
         if args.no_branches and pt["kind"] != "entry":
             continue
         base = os.path.basename(pt["file"].replace("\\", "/"))
         if base not in present:
+            # Точка геометрии указывает на файл, которого нет в --out (не
+            # извлечён — --pattern/include-list/exclude-list/чёрный список
+            # датчиков). РАНЬШЕ эта потеря не попадала ни в `skipped`, ни в
+            # один лог (см. ту же находку и фикс в instrument_java.py).
+            no_file_match += 1
             continue
         if pt["ins_col"] <= 0 or pt["ins_line"] <= 0:
             skipped.append((pt["func"], pt["kind"], "нет позиции тела"))
@@ -433,7 +396,7 @@ def main():
             insertions.setdefault(base, []).append(("inline_candidate", pt["ins_line"], pt["ins_col"], text,
                                                      pt["end_line"], pt["end_col"], _short_name(fn)))
         else:  # branch
-            bn = _lookup_br(fn, pt["ref_line"], pt["file"], br_num)
+            bn = _lookup_br(fn, pt["ref_line"], pt["file"], pt["ins_col"], br_num)
             if bn is None:
                 skipped.append((fn, f"branch@{pt['ref_line']}", "ветви нет в Перечень_ветвей"))
                 continue
@@ -445,8 +408,7 @@ def main():
                                                          pt["end_line"], pt["end_col"], _short_name(fn)))
             elif pt["has_block"] == 2:
                 # case/default: датчик ставится сразу после ':' метки, без
-                # обёртки в скобки — см. подробный комментарий в
-                # instrument_c_make.py и has_block=2 в probe_points.ql.
+                # обёртки в скобки (has_block=2).
                 insertions.setdefault(base, []).append(("direct", pt["ins_line"], pt["ins_col"], text))
             else:
                 # Обернуть одиночный оператор в блок: { __TRACE(...); stmt; }
@@ -463,6 +425,10 @@ def main():
     # ниже) — поэтому это "потенциальные" точки; точное число — в [OK].
     print(f"[4] Точек к размещению (потенциально): {total_sensors} "
           f"(пропущено точек: {len(skipped)})")
+    if no_file_match:
+        print(f"[3.1] Точек геометрии без файла в --out (не извлечён — "
+              f"--pattern/include-list/exclude-list/чёрный список датчиков): "
+              f"{no_file_match}")
 
     # 5. Применяем вставки (по убыванию строки/колонки — не сдвигаем координаты)
     def _strip_nl(s: str):
@@ -499,12 +465,11 @@ def main():
             elif _first_real_brace(ln_real) >= 0:
                 # Fallback: { найдена на строке, но не на заявленной позиции.
                 # _first_real_brace (а не наивный "{" in ln_real/.index)
-                # пропускает символьные/строковые литералы И однострочные
+                # пропускает символьные/строковые литералы и однострочные
                 # комментарии — иначе самодостаточный макрос без единой
-                # настоящей { на строке (см. MAKE_ADDER в instrument_c_make.py)
-                # ложно резолвился бы по случайной '{' в соседнем комментарии
-                # вида "// см. Foo::bar() { ... }", вместо того чтобы дойти до
-                # проверки "надёжного места нет" чуть ниже (см. ревью).
+                # настоящей { на строке ложно резолвился бы по случайной '{'
+                # в соседнем комментарии вместо перехода к проверке
+                # "надёжного места нет" чуть ниже.
                 brace_col = _first_real_brace(ln_real) + 1  # 1-based
                 if "__TRACE_FN" in text:
                     resolved.append(("newline_after", ln_no, brace_col, text))
@@ -647,7 +612,7 @@ def main():
                     lines[idx] = ln[:col] + " }" + ln[col:] + nl
             elif op == "direct":
                 # case/default — вставить текст датчика сразу после ':'
-                # метки, без скобок (см. has_block=2 в probe_points.ql).
+                # метки, без скобок (has_block=2).
                 # col (1-based) указывает на символ ПОСЛЕ ':' — переводим в
                 # 0-based ИНДЕКС этого символа (col - 1), как и везде при
                 # переходе из координат CodeQL в срез Python (см. "open":
@@ -664,8 +629,7 @@ def main():
                     lines[idx] = ln[:shifted_col] + " " + text + ln[shifted_col:] + nl
                 else:
                     # Граница не прошла — датчик не вставлен, sid нужно
-                    # вычесть из sensor_map (см. ревью: тот же класс бага,
-                    # что и в open/close-валидации выше).
+                    # вычесть из sensor_map.
                     dropped_sids.update(_sids_in_text(text))
         lines.insert(0, f'#include "__trace.h"{dominant_nl}')
         with open(fp, "w", encoding="utf-8", newline='') as f:

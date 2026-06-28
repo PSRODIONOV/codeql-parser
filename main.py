@@ -185,6 +185,10 @@ def main():
                "data", "arg_flow", "file_flow"]
     if needs_flowcharts or needs_routes or needs_branch_routes:
         _needed.append("flow")
+        # Геометрия catch (java/cpp) — отдельно от function_flow.ql, см.
+        # core/project_runner.py::run_static_analysis для подробностей.
+        if args.language in ("java", "cpp", "c"):
+            _needed.append("catch")
 
     _log_action(start_time, "ЗАПРОСЫ", f"Запуск {len(_needed)} CodeQL-запросов (одна загрузка БД)")
     _all_raw = analyzer.run_batch_queries(_needed)
@@ -197,6 +201,7 @@ def main():
     arg_flow_data = _all_raw.get("arg_flow", [])
     file_flow_data = _all_raw.get("file_flow", [])
     flow_data     = _all_raw.get("flow", [])
+    catch_data    = _all_raw.get("catch", [])
     _log_action(start_time, "ЗАПРОСЫ", "Запросы выполнены",
                 f"ФО:{len(func_data)}, ИО:{len(info_data)}, управление:{len(ctrl_data)}, "
                 f"данные:{len(data_data)}, файлов:{len(files_data)}")
@@ -328,7 +333,7 @@ def main():
             # Передаём ТОЛЬКО данные, относящиеся к ФО, чтобы не грузить всё в памяти
             generated, routes_by_func, branch_edges_by_func, branch_inventory_by_func = fc_gen.generate_all(
                 func_data, flow_data, info_data, ctrl_data,
-                data_data, file_flow_data,
+                data_data, file_flow_data, catch_data=catch_data,
                 route_writer=None if is_drakon else route_writer,
                 load_by_demand=True,  # Загружать данные по требованию
                 build_flowcharts=_should_create_report(selected_reports, "flowcharts"),  # Файлы только если нужны
@@ -342,7 +347,7 @@ def main():
                                            db_path=args.db_path, clear_output=False)
                 _, routes_by_func, branch_edges_by_func, branch_inventory_by_func = _fgen.generate_all(
                     func_data, flow_data, info_data, ctrl_data,
-                    data_data, file_flow_data, route_writer=route_writer,
+                    data_data, file_flow_data, catch_data=catch_data, route_writer=route_writer,
                     load_by_demand=True, build_flowcharts=False,
                     need_routes_in_memory=needs_branch_routes,
                     max_routes=args.max_routes

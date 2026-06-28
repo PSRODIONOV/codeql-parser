@@ -439,12 +439,9 @@ class _Layouter:
                                       route="LB", rail_x=r, no_marker=True))
 
         # Recurse into children (rare for leaf types, but possible).
-        # case/default — НЕ собственные блоки (метки границ ветвей switch,
-        # см. probe_points.ql/function_flow.ql), пропускаем их: иначе на
-        # схеме появлялись бы пустые блоки с текстом "case ..."/"default"
-        # посреди обычной последовательности (минимальный безопасный фикс
-        # для switch — без построения настоящего N-арного ветвления в
-        # каноническом DRAKON-layout, см. обсуждение).
+        # case/default — не собственные блоки (метки границ ветвей switch),
+        # пропускаем их: иначе на схеме появлялись бы пустые блоки с текстом
+        # "case ..."/"default" посреди обычной последовательности.
         if node["children"]:
             ch_sorted = sorted(node["children"], key=lambda c: c["line_start"])
             prev_id = nid
@@ -1290,6 +1287,7 @@ class DrakonGenerator:
         control_data:    List[Dict[str, str]]  = None,
         data_data:       List[Dict[str, str]]  = None,
         file_flow_data:  List[Dict[str, str]]  = None,
+        catch_data:      List[Dict[str, str]]  = None,  # не используется (см. FlowchartGenerator)
         route_writer                           = None,
         load_by_demand:  bool                  = False,
         build_flowcharts: bool                 = True,

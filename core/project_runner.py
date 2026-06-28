@@ -366,12 +366,16 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
     if needs_flow:      _needed.append("flow")
     # Геометрия точек вставки датчиков для инструментации: собираем в составе
     # сырых данных и сохраняем в project.db, чтобы инструментатор брал её оттуда,
-    # а не делал отдельный запрос probe_points.ql (см. instrument_cpp.py,
-    # instrument_java.py). Раньше список был только ("cpp", "c") — Java имеет
-    # queries/java/probe_points.ql ровно того же назначения, но "probe" для него
-    # никогда не собирался: --project-db в instrument_java.py читал ВСЕГДА
-    # пустую таблицу q_probe, молча давая 0 точек вставки без единой ошибки.
-    if language in ("cpp", "c", "java"): _needed.append("probe")
+    # а не делал отдельный запрос к БД (см. instrument_cpp.py, instrument_java.py).
+    # Геометрия входа/выхода и ветвей считается прямо в functional_objects.ql/
+    # function_flow.ql (раздел "functional"/"flow", запрашиваются выше по
+    # другим условиям) для обоих языков. Отдельно остаётся только catch (try
+    # может иметь несколько catch-клауз — не выражается одной колонкой на
+    # строке try, см. queries/java/catch_points.ql, queries/cpp/catch_points.ql).
+    # catch нужен только если запрашивались ветви (та же геометрия, тот же
+    # branch_num, что у их try): без "flow" Перечень_ветвей не строится, и
+    # catch-геометрия была бы бесполезна (нечему сопоставить branch_num).
+    if language in ("java", "cpp", "c") and needs_flow: _needed.append("catch")
 
     _LABELS: Dict[str, tuple] = {
         "functional": ("ФО",      "Сбор функциональных объектов"),
@@ -383,7 +387,7 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
         "arg_flow":   ("МАТРИЦЫ", "Аргументные потоки"),
         "file_flow":  ("МАТРИЦЫ", "Обращения к файлам"),
         "flow":       ("ПОТОК",   "Управляющие конструкции (if/for/while/...)"),
-        "probe":      ("ДАТЧИКИ", "Геометрия точек вставки (вход/выход/ветви)"),
+        "catch":      ("CATCH",   "Геометрия точек вставки catch"),
     }
 
     def _on_query_done(name: str, count: int):
@@ -427,13 +431,8 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
     # ФО, чьё короткое имя физически не встречается в исходной строке —
     # имя целиком собрано макросом (X-macro, G_DEFINE_TYPE и подобные) —
     # инструментировать их нельзя, исключаем из всех дальнейших отчётов.
-    # ТОЛЬКО для cpp/c — специфика препроцессора (комментарий это всегда
-    # утверждал, но условие ниже раньше реально включало ЛЮБОЙ язык кроме
-    # php/sql, в т.ч. java — у которой нет ни препроцессора, ни макросов;
-    # баг найден на gosjava: org.omg.CORBA.StringSeqHelper.insert/extract/
-    # read ложно считались "собранными макросом" из-за коллизии basename в
-    # read_source_snapshot, см. fo_filters.py — но сам факт применения
-    # фильтра к Java был отдельной, более фундаментальной ошибкой).
+    # Только для cpp/c — специфика препроцессора; у Java нет ни
+    # препроцессора, ни макросов, фильтр к ней не применяется.
     if language in ("cpp", "c") and raw.get("functional"):
         _macro_keys = ("functional", "info", "data", "flow", "signature")
         _t_macro = time.perf_counter()
@@ -495,7 +494,8 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
             generated, routes_by_func, branch_edges_by_func, branch_inventory_by_func = \
                 fc_gen.generate_all(
                     raw["functional"], raw["flow"], raw["info"], raw["control"],
-                    raw["data"], raw["file_flow"], route_writer=None,
+                    raw["data"], raw["file_flow"], catch_data=raw.get("catch"),
+                    route_writer=None,
                     load_by_demand=True, build_flowcharts=build_fc,
                     need_routes_in_memory=True, max_routes=max_routes,
                     progress=lambda lbl, c, t: _progress(progress, lbl, c, t),
@@ -511,7 +511,8 @@ def run_static_analysis(project: ProjectDB, codeql_path: str = "codeql",
                 _, routes_by_func, branch_edges_by_func, branch_inventory_by_func = \
                     _fgen.generate_all(
                         raw["functional"], raw["flow"], raw["info"], raw["control"],
-                        raw["data"], raw["file_flow"], route_writer=None,
+                        raw["data"], raw["file_flow"], catch_data=raw.get("catch"),
+                        route_writer=None,
                         load_by_demand=True, build_flowcharts=False,
                         need_routes_in_memory=True, max_routes=max_routes,
                         progress=lambda lbl, c, t: _progress(progress, lbl, c, t),
@@ -696,7 +697,7 @@ def generate_static_reports(project: ProjectDB,
             report.add_route_graph(gb.build_route_graph(func_data, ctrl_data, branch_graph),
                                    func_index)
 
-    # Перечень ветвей
+    # Перечень ветвей (catch — обычные строки этого же отчёта, Тип=catch)
     if _sel(selected, CHECK_BRANCH_LIST) and branch_inventory_by_func:
         report.add_branch_inventory(branch_inventory_by_func, func_index, func_file, func_data)
 

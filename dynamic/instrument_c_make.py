@@ -27,7 +27,7 @@ CodeQL, включая файлы, появляющиеся только во в
       [--codeql codeql] [--lang cpp] [--pattern '%/hotspot/%']
       [--include-list files.txt] [--exclude-list files.txt]
 """
-import argparse, tempfile, csv, os, re, shutil, subprocess, sys
+import argparse, csv, os, re, shutil, subprocess, sys
 from pathlib import Path
 from collections import defaultdict
 
@@ -50,15 +50,14 @@ sys.path.insert(0, str(HERE))
 from _instrument_common import sids_in_text as _sids_in_text  # noqa: E402
 from _instrument_common import first_real_brace as _first_real_brace  # noqa: E402
 from _instrument_common import is_reliable_stmt_end as _is_reliable_stmt_end  # noqa: E402
+from _instrument_common import read_fo_geometry, read_branch_geometry  # noqa: E402
 
 
 def read_fo_numbers(reports_dir: Path):
-    """qualified_name -> [(fo_num, file, line), ...] — СПИСОК, а не один
+    """qualified_name -> [(fo_num, file, line), ...] — список, а не один
     номер: разные функции (в разных файлах — static-тёзки, перегрузки)
-    могут иметь одинаковый qualified_name. Раньше последняя запись просто
-    затирала предыдущие при одинаковом имени — это давало НЕВЕРНЫЙ номер
-    ФО для датчика, если probe_points.ql сослался на ОДНОИМЁННУЮ, но
-    физически другую функцию. См. _lookup_fo — дисамбигуация по файлу."""
+    могут иметь одинаковый qualified_name. См. _lookup_fo — дисамбигуация
+    по файлу."""
     fo = {}
     with open(reports_dir / "Перечень_ФО(процедур_функций).csv", encoding="utf-8-sig") as fh:
         for row in list(csv.reader(fh, delimiter=";"))[1:]:
@@ -70,47 +69,26 @@ def read_fo_numbers(reports_dir: Path):
 
 
 def read_branch_numbers(reports_dir: Path):
-    """(qualified_name, line) -> [(branch_num, file), ...] — см. read_fo_numbers:
-    тот же класс коллизий возможен, если у двух одноимённых функций в
-    разных файлах ветвь оказалась на одной и той же строке."""
+    """(qualified_name, line) -> [(branch_num, file, ins_col), ...] — см.
+    read_fo_numbers: тот же класс коллизий возможен, если у двух одноимённых
+    функций в разных файлах ветвь оказалась на одной и той же строке.
+    ins_col (из "Позиция вставки") — доп. дисамбигуация if/else ОДНОСТРОЧНОЙ
+    формы (`if (x) a(); else b();`): у обоих одна "Строка", различаются
+    только колонкой вставки (см. _pick_by_branch)."""
     br = {}
     with open(reports_dir / "Перечень_ветвей.csv", encoding="utf-8-sig") as fh:
         for row in list(csv.reader(fh, delimiter=";"))[1:]:
             if len(row) >= 7 and row[2].strip() and row[6].strip():
                 key = (row[2].strip(), int(row[6]))
                 file = row[5].strip() if len(row) > 5 and row[5].strip() else None
-                br.setdefault(key, []).append((int(row[3]), file))
+                ins_col = None
+                if len(row) > 7 and ":" in row[7]:
+                    try:
+                        ins_col = int(row[7].rsplit(":", 1)[1])
+                    except ValueError:
+                        pass
+                br.setdefault(key, []).append((int(row[3]), file, ins_col))
     return br
-
-
-def run_probe_query(codeql, db, query, path_pattern: str = "%"):
-    content = query.read_text(encoding="utf-8")
-    if "${PROJECT_PATTERN}" in content:
-        tmp = query.parent / f".{query.name}"
-        tmp.write_text(content.replace("${PROJECT_PATTERN}", path_pattern or "%"), encoding="utf-8")
-        query_to_run = tmp
-    else:
-        query_to_run = query
-    bqrs = Path(tempfile.gettempdir(), "probe_cmake.bqrs")
-    csvp = Path(tempfile.gettempdir(), "probe_cmake.csv")
-    subprocess.run([codeql, "query", "run", f"--database={db}", f"--output={bqrs}", str(query_to_run)],
-                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    with open(csvp, "w") as out:
-        subprocess.run([codeql, "bqrs", "decode", "--format=csv", str(bqrs)],
-                       check=True, stdout=out, stderr=subprocess.DEVNULL)
-    pts = []
-    with open(csvp, encoding="utf-8") as fh:
-        r = csv.reader(fh); next(r, None)
-        for row in r:
-            if len(row) < 8: continue
-            pts.append({
-                "kind":     row[0], "func": row[1], "file": row[2].replace("\\", "/"),
-                "ref_line": int(row[3]), "ins_line": int(row[4]),
-                "ins_col":  int(row[5]), "has_block": int(row[6]), "btype": row[7],
-                "end_line": int(row[8]) if len(row) > 8 else 0,
-                "end_col":  int(row[9]) if len(row) > 9 else 0,
-            })
-    return pts
 
 
 def _strip_tpl(name: str) -> str:
@@ -134,13 +112,11 @@ def _file_matches(a, b) -> bool:
 def _pick_by_file(cands, file, line=None):
     """cands — список (номер, файл[, строка]) для одного имени. Если ровно
     один кандидат — однозначно он. При нескольких (коллизия одноимённых
-    функций) — сперва пробуем файл+строку точно (различает ПЕРЕГРУЗКИ в
-    ОДНОМ файле, напр. 'emit_opcode' на разных строках ad_x86_64.cpp — файла
-    одного недостаточно), затем только файл (различает static-тёзки в
-    разных файлах). Если совпадения не нашлось вовсе (напр. функция, чьё
-    тело физически в другом файле, чем 'Объявлен в' — см. фикс
-    file-attribution в probe_points.ql) — берётся первый кандидат, как было
-    раньше (не хуже старого поведения)."""
+    функций) — сперва файл+строка точно (различает перегрузки в ОДНОМ
+    файле, напр. 'emit_opcode' на разных строках ad_x86_64.cpp), затем
+    только файл (различает static-тёзки в разных файлах); если совпадения
+    нет вовсе (напр. функция, чьё тело физически в другом файле, чем
+    'Объявлен в') — берётся первый кандидат."""
     if not cands:
         return None
     if len(cands) == 1:
@@ -177,11 +153,30 @@ def _short_name(qualified_name: str) -> str:
     return _strip_tpl(qualified_name).rsplit("::", 1)[-1]
 
 
-def _lookup_br(fn: str, ref_line: int, file: str, br_num: dict):
+def _pick_by_branch(cands, file, ins_col):
+    """См. instrument_cpp.py::_pick_by_branch — точное совпадение колонки
+    вставки различает if/else однострочной формы (одна "Строка", разный
+    ins_col), затем файл, иначе первый кандидат."""
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0][0]
+    if ins_col:
+        for num, cfile, ccol in cands:
+            if ccol == ins_col and (not file or not cfile or _file_matches(cfile, file)):
+                return num
+    if file:
+        for num, cfile, _ in cands:
+            if _file_matches(cfile, file):
+                return num
+    return cands[0][0]
+
+
+def _lookup_br(fn: str, ref_line: int, file: str, ins_col, br_num: dict):
     for d in (0, 1, -1, 2, -2):
         cands = br_num.get((fn, ref_line + d))
         if cands:
-            return _pick_by_file(cands, file)
+            return _pick_by_branch(cands, file, ins_col)
     return None
 
 
@@ -346,21 +341,23 @@ def main():
     print(f"[2] ФО: {fo_total} (уникальных имён: {len(fo_num)}), "
           f"ветвей: {br_total} (уникальных пар имя/строка: {len(br_num)})")
 
-    pts = run_probe_query(args.codeql, db_path,
-                          HERE.parent / "queries" / args.lang / "probe_points.ql",
-                          path_pattern=args.pattern or "%")
+    # Геометрия точек вставки считана прямо в статике
+    # (functional_objects.ql/function_flow.ql/catch_points.ql). Читаем её из
+    # тех же CSV, из которых уже взяты fo_num/br_num выше (мирроринг
+    # instrument_cpp.py/instrument_java.py).
+    pts = read_fo_geometry(reports) + read_branch_geometry(reports)
     n_before_dedup = len(pts)
     pts = _dedup_by_position(pts)
-    print(f"[3] Точек вставки из CodeQL: {n_before_dedup} "
-          f"(после дедупликации шаблонных инстанциаций по позиции: {len(pts)})")
+    print(f"[3] Точек вставки: {n_before_dedup} (из отчётов статики; "
+          f"после дедупликации шаблонных инстанциаций по позиции: {len(pts)})")
 
     # Точное сопоставление: extract_project_sources извлёк дерево из ТЕХ ЖЕ
     # абсолютных путей (db_prefix — общий префикс build-машины, срезанный
-    # при извлечении), поэтому файл probe_points.ql детерминированно лежит
-    # по rel = pt["file"] минус db_prefix — без нечёткого сопоставления по
-    # basename (раньше могло путать одноимённые файлы в разных каталогах).
+    # при извлечении), поэтому файл из статики детерминированно лежит по
+    # rel = pt["file"] минус db_prefix — без нечёткого сопоставления по
+    # basename (которое путает одноимённые файлы в разных каталогах).
     def match_file(probe_path):
-        norm = probe_path.lstrip("/")
+        norm = probe_path.replace("\\", "/").lstrip("/")
         rel = norm[len(db_prefix):] if db_prefix and norm.startswith(db_prefix) else norm
         p = out / rel
         return p if p.is_file() else None
@@ -410,7 +407,7 @@ def main():
                                    pt["end_line"], pt["end_col"], _short_name(fn)))
             touched.add(fp)
         else:
-            bn = _lookup_br(fn, pt["ref_line"], pt["file"], br_num)
+            bn = _lookup_br(fn, pt["ref_line"], pt["file"], pt["ins_col"], br_num)
             if bn is None:
                 skipped += 1; continue
             s = sid; sid += 1
@@ -422,9 +419,9 @@ def main():
             elif pt["has_block"] == 2:
                 # case/default: датчик ставится сразу после ':' метки, без
                 # какой-либо обёртки в скобки — метки внутри switch делят
-                # ОДИН общий блок тела, поэтому ни поиск '{' (has_block=1),
+                # один общий блок тела, поэтому ни поиск '{' (has_block=1),
                 # ни обёртка "{ датчик; оператор; }" (has_block=0) здесь не
-                # нужны и не подходят (см. probe_points.ql).
+                # подходят.
                 insertions[fp].append(("direct", pt["ins_line"], pt["ins_col"], text))
             else:
                 el, ec = pt["end_line"], pt["end_col"]
@@ -479,12 +476,11 @@ def main():
             elif _first_real_brace(ln_real) >= 0:
                 # Fallback: { найдена на строке, но не на заявленной позиции.
                 # _first_real_brace (а не наивный "{" in ln_real/.index)
-                # пропускает символьные/строковые литералы И однострочные
+                # пропускает символьные/строковые литералы и однострочные
                 # комментарии — иначе самодостаточный макрос без единой
-                # настоящей { на строке (см. MAKE_ADDER ниже) ложно резолвился
-                # бы по случайной '{' в соседнем комментарии вида "// см.
-                # Foo::bar() { ... }", вместо того чтобы дойти до проверки
-                # "надёжного места нет" чуть ниже (см. ревью этой сессии).
+                # настоящей { на строке ложно резолвился бы по случайной '{'
+                # в соседнем комментарии вместо перехода к проверке
+                # "надёжного места нет" чуть ниже.
                 brace_col = _first_real_brace(ln_real) + 1  # 1-based
                 if "__TRACE_FN" in text:
                     resolved.append(("newline_after", ln_no, brace_col, text))
@@ -546,12 +542,10 @@ def main():
                     final.append(resolved[i + 1])
                 else:
                     # Пара не прошла валидацию (выход за границы файла —
-                    # координата от CodeQL искажена макрорасширением, ИЛИ
-                    # c_last_ok=False) — sid обеих половин (open и close,
-                    # если у close есть свой sid) надо вычесть из
+                    # координата от CodeQL искажена макрорасширением, или
+                    # c_last_ok=False) — sid обеих половин надо вычесть из
                     # sensor_map, иначе Карта_датчиков.csv лжёт про датчик,
-                    # которого в реальном тексте нет (см. ревью: тот же
-                    # класс бага, что и в short_name not in ln_real выше).
+                    # которого в реальном тексте нет.
                     dropped_sids.update(_sids_in_text(entry[3]))
                 i += 2
             else:
@@ -640,7 +634,7 @@ def main():
                     lines[idx] = ln[:shifted_col] + " }" + ln[shifted_col:] + nl
             elif op == "direct":
                 # case/default — просто вставить текст датчика сразу после
-                # ':' метки, без скобок (см. has_block=2 в probe_points.ql).
+                # ':' метки, без скобок (has_block=2).
                 # col (1-based) указывает на символ ПОСЛЕ ':' — переводим в
                 # 0-based ИНДЕКС этого символа (col - 1), как и везде при
                 # переходе из координат CodeQL в срез Python (см. "open"/
@@ -662,8 +656,7 @@ def main():
                 else:
                     # Граница не прошла (накопленный сдвиг увёл shifted_col
                     # за пределы строки) — датчик не вставлен, sid нужно
-                    # вычесть из sensor_map (см. ревью: тот же класс бага,
-                    # что и в open/close-валидации выше).
+                    # вычесть из sensor_map.
                     dropped_sids.update(_sids_in_text(text))
 
         lines.insert(0, f'#include "__trace.h"{dominant_nl}')

@@ -1,11 +1,74 @@
 """Общие хелперы для instrument_c_make.py/instrument_cpp.py.
 
 Оба скрипта инструментируют C/C++ исходники одинаковым текстовым способом
-(вставка __TRACE/__TRACE_FN), и обнаруженные баги (см. ревью) повторялись
-в обоих файлах один-в-один. Здесь — то, что реально общее, чтобы фикс
-применялся один раз, а не дважды вручную.
+(вставка __TRACE/__TRACE_FN) — здесь то, что у них реально общее.
 """
+import csv
 import re
+from pathlib import Path
+
+
+def _parse_pos(s: str):
+    """'line:col' -> (line, col); пусто/мусор -> (0, 0)."""
+    if s and ":" in s:
+        a, b = s.split(":", 1)
+        try:
+            return int(a), int(b)
+        except ValueError:
+            pass
+    return 0, 0
+
+
+def read_fo_geometry(reports_dir: Path):
+    """Геометрия входа/выхода ФО — из Перечень_ФО(процедур_функций).csv
+    (колонки "Позиция входа"/"Позиция выхода", считаются в
+    queries/cpp/functional_objects.ql). Формат результата: kind/func/file/
+    ref_line/ins_line/ins_col/has_block/btype/end_line/end_col — это и
+    ожидает main() обоих инструментаторов."""
+    pts = []
+    p = reports_dir / "Перечень_ФО(процедур_функций).csv"
+    with open(p, encoding="utf-8-sig") as fh:
+        for row in list(csv.reader(fh, delimiter=";"))[1:]:
+            if not (row and row[0].strip() and len(row) > 5 and row[1].strip()):
+                continue
+            name = row[1].strip()
+            m = re.match(r'^(.*)\((\d+)\)$', row[2].strip()) if row[2].strip() else None
+            if not m:
+                continue
+            file, ref_line = m.group(1), int(m.group(2))
+            ins_line, ins_col = _parse_pos(row[4].strip())
+            end_line, end_col = _parse_pos(row[5].strip())
+            pts.append({"kind": "entry", "func": name, "file": file, "ref_line": ref_line,
+                        "ins_line": ins_line, "ins_col": ins_col, "has_block": 1, "btype": "-",
+                        "end_line": end_line, "end_col": end_col})
+    return pts
+
+
+def read_branch_geometry(reports_dir: Path):
+    """Геометрия ветвей — из Перечень_ветвей.csv (колонки "Позиция вставки"/
+    "Блок"/"Позиция конца", считаются в queries/cpp/function_flow.ql/
+    viz/flowchart_generator.py). catch — обычные строки этого же отчёта
+    (Тип=catch, со своим номером ветви, см. queries/cpp/catch_points.ql).
+    has_block читается напрямую из колонки "Блок" (а не выводится из Тип) —
+    надёжнее при появлении новых типов веток. Формат результата — тот же,
+    что ожидает main() обоих инструментаторов."""
+    pts = []
+    p = reports_dir / "Перечень_ветвей.csv"
+    with open(p, encoding="utf-8-sig") as fh:
+        for row in list(csv.reader(fh, delimiter=";"))[1:]:
+            if not (len(row) >= 9 and row[2].strip() and row[6].strip()):
+                continue
+            func, btype, file, ref_line = row[2].strip(), row[4].strip(), row[5].strip(), int(row[6])
+            ins_line, ins_col = _parse_pos(row[7].strip())
+            try:
+                has_block = int(row[8].strip()) if row[8].strip() != "" else 1
+            except ValueError:
+                has_block = 1
+            end_line, end_col = _parse_pos(row[9].strip()) if len(row) > 9 else (0, 0)
+            pts.append({"kind": "branch", "func": func, "file": file, "ref_line": ref_line,
+                        "ins_line": ins_line, "ins_col": ins_col, "has_block": has_block,
+                        "btype": btype, "end_line": end_line, "end_col": end_col})
+    return pts
 
 
 def sids_in_text(text: str) -> set:
@@ -20,14 +83,11 @@ def sids_in_text(text: str) -> set:
 
 
 def first_real_brace(ln: str) -> int:
-    """Найти позицию первой "настоящей" '{' в строке — пропуская символьные
-    /строковые литералы и однострочный комментарий (// ...). Используется
-    как fallback при разрешении inline_candidate, когда { на заявленной
-    CodeQL-позиции нет (см. probe_points.ql) — без пропуска литералов и
-    комментариев самодостаточный макрос без единой настоящей { на строке
-    (см. MAKE_ADDER/JAVA_INTEGER_OP) ложно находил бы '{' в соседнем
-    комментарии вида "// см. Foo::bar() { ... }" и резолвился по ней вместо
-    того, чтобы быть распознанным как "надёжного места нет" и пропущенным."""
+    """Найти позицию первой "настоящей" '{' в строке — пропуская символьные/
+    строковые литералы и однострочный комментарий (// ...). Fallback при
+    разрешении inline_candidate, когда { на заявленной CodeQL-позиции нет:
+    без пропуска литералов/комментариев самодостаточный макрос без единой
+    настоящей { на строке ложно находил бы '{' в соседнем комментарии."""
     in_str = None  # None | '"' | "'"
     i, n = 0, len(ln)
     while i < n:
@@ -59,6 +119,6 @@ def is_reliable_stmt_end(ch: str) -> bool:
     '({ ... })' и т.п.) заканчивается ПУНКТУАЦИЕЙ (';', ')', '}' ...), а не
     буквой/цифрой/'_'. Буква/цифра/'_' на этой позиции означает, что
     координата конца оператора от CodeQL обрезана ВНУТРИ идентификатора —
-    признак HotSpot-идиомы CHECK/CHECK_/RETURN/TRAPS (макрос — последний
-    аргумент вызова, сам закрывающий список аргументов, см. ревью)."""
+    признак макроса-аргумента, который сам закрывает список аргументов
+    вызова (напр. HotSpot CHECK/CHECK_/RETURN/TRAPS)."""
     return not (ch.isalnum() or ch == '_')

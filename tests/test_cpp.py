@@ -15,7 +15,7 @@ import pytest
 from conftest import source_line, get_sig_line
 
 ALLOWED_TYPES = {"if", "else", "for", "while", "do", "try", "catch", "case", "default"}
-TOTAL_BRANCHES = 104
+TOTAL_BRANCHES = 115
 
 
 def _short(fo: str) -> str:
@@ -47,6 +47,45 @@ class TestBranchDetection:
         rows = branches_of(cpp_branches_inventory, "else_if_chain")
         assert len(rows) == 4 and set(types_of(rows)) == {"if"}
         assert sorted(nums_of(rows)) == ["1", "2", "3", "4"]
+
+    def test_else_has_own_branch_num_distinct_from_if(self, cpp_branches_inventory):
+        """else не делит номер ветви со своим if — __TRACE(s,fo,br) должен
+        быть разным для then- и else-блока, иначе покрытие/маршруты не
+        отличают, какой из них выполнился."""
+        rows = branches_of(cpp_branches_inventory, "if_else")
+        nums = {r.get("Тип"): r.get("№ ветви") for r in rows}
+        assert nums.get("if") and nums.get("else")
+        assert nums["if"] != nums["else"]
+
+    @pytest.mark.parametrize("fn", [
+        "if_else_oneline_nn", "if_else_oneline_bb",
+        "if_else_oneline_nb", "if_else_oneline_bn",
+    ])
+    def test_oneline_else_has_own_branch_num(self, cpp_branches_inventory, fn):
+        """То же, что test_else_has_own_branch_num_distinct_from_if, но для
+        ОДНОСТРОЧНОЙ формы (`if (x) a(); else b();` — if и else на одной
+        "Строке"): лукап по (имя, строка) совпадает для обоих, различаются
+        только колонкой вставки (см. _pick_by_branch)."""
+        rows = branches_of(cpp_branches_inventory, fn)
+        nums = {r.get("Тип"): r.get("№ ветви") for r in rows}
+        assert nums.get("if") and nums.get("else")
+        assert nums["if"] != nums["else"]
+
+    def test_catch_has_own_branch_num_distinct_from_try(self, cpp_branches_inventory):
+        """То же для try/catch: catch теперь обычная строка инвентаря (Тип=
+        catch) со СВОИМ номером, не общим с try (см. queries/cpp/catch_points.ql)."""
+        rows = branches_of(cpp_branches_inventory, "simple_try")
+        nums = {r.get("Тип"): r.get("№ ветви") for r in rows}
+        assert nums.get("try") and nums.get("catch")
+        assert nums["try"] != nums["catch"]
+
+    def test_multiple_catch_clauses_get_distinct_numbers(self, cpp_branches_inventory):
+        """try_multiple_catch — 3 catch-клаузы, каждая со своим номером (не
+        общим друг с другом и не общим с try)."""
+        rows = branches_of(cpp_branches_inventory, "try_multiple_catch")
+        catch_nums = [r.get("№ ветви") for r in rows if r.get("Тип") == "catch"]
+        assert len(catch_nums) == 3
+        assert len(set(catch_nums)) == 3
 
     def test_switch_cases_numbered(self, cpp_branches_inventory):
         """switch: 7 case + 1 default, пронумерованы 1..8."""
@@ -157,17 +196,12 @@ class TestMacroFO:
         assert not (fo_nums & entry_fo_nums)
 
     def test_macro_filter_resolves_basename_collision(self, tmp_path):
-        """Баг (реальный проект, gosjava — обнаружен на Java, но
-        read_source_snapshot/filter_macro_synthesized_fo общие для cpp/java):
-        src.zip может содержать ДВА файла с ОДИНАКОВЫМ basename в разных
-        каталогах (типично для генерируемого кода — напр. CORBA-генератор
-        кладёт одноимённые Helper.java в разные пакеты). Раньше
-        read_source_snapshot индексировал ТОЛЬКО по basename — первый
-        попавшийся файл с этим именем отдавался ДЛЯ ВСЕХ путей с тем же
-        именем. filter_macro_synthesized_fo сверял имя настоящего ФО со
-        строкой ЧУЖОГО (другого каталога) файла, не находил совпадения и
-        ложно решал, что имя "собрано макросом" — теряя реальную функцию.
-        Теперь индексация по относительному пути устраняет коллизию."""
+        """src.zip может содержать два файла с одинаковым basename в разных
+        каталогах (типично для генерируемого кода, напр. CORBA-генератор
+        кладёт одноимённые Helper.java в разные пакеты). read_source_snapshot
+        индексирует по относительному пути, не только по basename — иначе
+        filter_macro_synthesized_fo сверял бы имя настоящего ФО со строкой
+        чужого файла и ложно решал, что имя "собрано макросом"."""
         import sys, zipfile
         from pathlib import Path as _Path
         sys.path.insert(0, str(_Path(__file__).parent.parent))
@@ -234,15 +268,32 @@ class TestSensorMap:
         assert sorted((r.get("Запись (br)", "") for r in rows), key=int) == ["1", "2"]
 
     def test_macro_generated_case_sensors_not_duplicated(self, cpp_branches_sensors, cpp_branches_fo):
-        """Регрессия (REP8-style, см. assembler_x86.cpp): case-метки из
-        ОДНОГО макровызова не порождают несколько датчиков на одну позицию
-        (раньше это рвало текст — __TRACE и до, и после ':'). Ровно 2
-        датчика (case 20, default), не 6 (4 из макроса + 2 обычных)."""
+        """case-метки из одного макровызова не порождают несколько датчиков
+        на одну позицию. Ровно 2 датчика (case 20, default), не 6
+        (4 из макроса + 2 обычных)."""
         fo_num = next(r.get("№ п/п") for r in cpp_branches_fo if r.get("Объект") == "macro_generated_cases")
         rows = [r for r in cpp_branches_sensors
                 if r.get("№ ФО") == fo_num and r.get("Тип") in ("case", "default")]
         assert len(rows) == 2
         assert sorted((r.get("Запись (br)", "") for r in rows), key=int) == ["1", "2"]
+
+    @pytest.mark.parametrize("fn", [
+        "if_else_oneline_nn", "if_else_oneline_bb",
+        "if_else_oneline_nb", "if_else_oneline_bn",
+    ])
+    def test_oneline_if_else_sensors_distinct(self, cpp_branches_sensors, cpp_branches_fo, fn):
+        """Для однострочной формы if/else оба имеют одну "Строку" в
+        Перечень_ветвей; _lookup_br дисамбигуирует по колонке вставки
+        (см. _pick_by_branch) — if и else должны получить разные sid и
+        разные номера ветви."""
+        fo_num = next(r.get("№ п/п") for r in cpp_branches_fo if r.get("Объект") == fn)
+        rows = [r for r in cpp_branches_sensors
+                if r.get("№ ФО") == fo_num and r.get("Тип") in ("if", "else")]
+        assert len(rows) == 2, f"{fn}: ожидалось 2 датчика (if+else), получено {len(rows)}"
+        sids = {r.get("sid") for r in rows}
+        brs = {r.get("Запись (br)") for r in rows}
+        assert len(sids) == 2, f"{fn}: датчики if/else делят sid"
+        assert len(brs) == 2, f"{fn}: датчики if/else делят номер ветви"
 
     def test_every_fo_has_entry_and_exit(self, cpp_branches_sensors):
         entries, exits = set(), set()
@@ -337,26 +388,24 @@ class TestInstrumentorRegressionBugs:
             "датчик разрезал ключевое слово тела case/default")
 
     def test_self_contained_macro_call_not_corrupted(self, cpp_branches_instrumented_src):
-        """Баг: самодостаточный макрос (MAKE_ADDER), разворачивающийся в
-        ЦЕЛУЮ функцию одним вызовом, раньше оборачивался в "{ датчик;
-        ВЫЗОВ }" — вложенное определение функции внутри блока (ошибка
-        сборки). Строка вызова должна остаться буквально неизменной."""
+        """Самодостаточный макрос (MAKE_ADDER), разворачивающийся в целую
+        функцию одним вызовом, не должен оборачиваться в "{ датчик; ВЫЗОВ }"
+        — это вложенное определение функции внутри блока (ошибка сборки).
+        Строка вызова должна остаться буквально неизменной."""
         src = (cpp_branches_instrumented_src / "macro_demo.cpp").read_text(encoding="utf-8")
         assert re.search(r"^MAKE_ADDER\(add_via_macro\)\s*$", src, re.M), "вызов MAKE_ADDER изменён"
         assert re.search(r"^MAKE_ADDER\(add_via_macro2\)\s*$", src, re.M), "вызов MAKE_ADDER изменён"
 
     def test_macro_generated_case_call_not_corrupted(self, cpp_branches_instrumented_src):
-        """Регрессия (REP8-style): вызов макроса, разворачивающегося в
-        несколько case-меток, не должен получать датчик ДО или ПОСЛЕ ':'
-        (раньше — __TRACE с обеих сторон общего ':')."""
+        """Вызов макроса, разворачивающегося в несколько case-меток, не
+        должен получать датчик до или после общего ':'."""
         src = (cpp_branches_instrumented_src / "negative_demo.cpp").read_text(encoding="utf-8")
         assert re.search(r"^\s*case CASES4\(10\):\s*//", src, re.M), "вызов CASES4(10): изменён"
 
     def test_oneline_if_else_no_brace_sensors_not_overlapping(self, cpp_branches_instrumented_src):
-        """Баг: утечка col_shifts между несколькими open/close-вставками на
-        ОДНОЙ строке (`if (...) r=...; else r=...;` без скобок) переносила
-        чужой сдвиг на не связанную с ним вставку и рвала уже вставленный
-        __TRACE() соседней ветви (закрывающая } влезала в его аргументы)."""
+        """Несколько open/close-вставок на ОДНОЙ строке (`if (...) r=...;
+        else r=...;` без скобок) не должны переносить сдвиг колонки одной
+        вставки на другую и рвать уже вставленный __TRACE() соседней ветви."""
         src = (cpp_branches_instrumented_src / "oneline_demo.cpp").read_text(encoding="utf-8")
         m = re.search(r"if_else_oneline_nn\(int x\) \{.*?\n(.*?)\n\s*return r;", src, re.S)
         assert m, "if_else_oneline_nn не найдена в инструментированном исходнике"
@@ -368,27 +417,23 @@ class TestInstrumentorRegressionBugs:
                           r" else \{ __TRACE\(\d+, \d+, \d+\); r = x \* 3 \+ 1; \}", body)
 
     def test_check_macro_idiom_not_corrupted(self, cpp_branches_instrumented_src):
-        """Регрессия (HotSpot CHECK/CHECK_/RETURN/TRAPS-идиома, см.
-        classFileParser.cpp::classfile_parse_error(..., CHECK)): макрос —
-        последний аргумент вызова, сам закрывающий список аргументов и
-        порождающий if внутри своего раскрытия — CodeQL репортует конец
-        одиночного оператора-тела if (hasBlock=0) сразу после "CHECK", а не
-        после настоящего ');'. Обёртка "{ датчик; ВЫЗОВ }" по такой
-        координате вставила бы "}" ВНУТРЬ списка аргументов вызова
-        (`log_message("...", DUMMY_THREAD });`). Строка должна остаться
-        буквально неизменной — без датчика."""
+        """HotSpot CHECK/CHECK_/RETURN/TRAPS-идиома: макрос — последний
+        аргумент вызова, сам закрывающий список аргументов и порождающий if
+        внутри своего раскрытия — CodeQL репортует конец одиночного
+        оператора-тела if (hasBlock=0) сразу после "CHECK", а не после
+        настоящего ');'. Обёртка "{ датчик; ВЫЗОВ }" по такой координате
+        вставила бы "}" внутрь списка аргументов вызова. Строка должна
+        остаться буквально неизменной — без датчика."""
         src = (cpp_branches_instrumented_src / "macro_demo.cpp").read_text(encoding="utf-8")
         assert re.search(r'^\s*log_message\("guarded call", CHECK\);\s*$', src, re.M), (
             "вызов log_message(..., CHECK) изменён/разрезан")
 
     def test_while_try_no_brace_catch_not_orphaned(self, cpp_branches_instrumented_src):
         """Баг #8: `while(...) try {...} catch(...) {...}` без своих {} вокруг
-        while (тело while — это сам TryStmt) — CodeQL даёт TryStmt.getLocation()
-        только до конца try-блока, БЕЗ catch-обработчика, поэтому закрывающая
-        '}' обёртки одиночного оператора (has_block=0) могла попасть ПРЯМО
-        ПЕРЕД catch — он оставался "осиротевшим" вне фигурных скобок while
-        (см. rikdataset.cpp, GDAL/RIK, RIKRasterBand::IReadBlock). catch
-        должен остаться ВНУТРИ обёртки, сразу после try-блока."""
+        while (тело while — сам TryStmt) — CodeQL даёт TryStmt.getLocation()
+        только до конца try-блока, без catch-обработчика. catch должен
+        остаться внутри обёртки одиночного оператора, сразу после
+        try-блока."""
         src = (cpp_branches_instrumented_src / "exception_demo.cpp").read_text(encoding="utf-8")
         m = re.search(r"while_try_no_brace\(int n\) \{.*?\n(.*?)\n\s*return total;", src, re.S)
         assert m, "while_try_no_brace не найдена в инструментированном исходнике"
@@ -400,16 +445,12 @@ class TestInstrumentorRegressionBugs:
             "датчик catch не сразу после его {")
 
     def test_constexpr_function_not_instrumented(self, cpp_branches_instrumented_src):
-        """Баг #9: constexpr-функция не должна получать датчик —
-        __TRACE_FN() вызывает обычную (не constexpr) __trace_enter(), что
-        ломает constexpr-вычислимость функции и даёт каскад ошибок в любом
-        зависимом constexpr-контексте/шаблоне (прототип: реальная сборка
-        osm2pgsql/contrib/fmt — fmt::v8::monostate::monostate(),
-        is_constant_evaluated() — каскад из 100+ ошибок компиляции по всей
-        библиотеке). ФО легитимен в статике, но БЕЗ датчика (как
-        самодостаточный макрос/CHECK-идиома, см. probe_points.ql::
-        not f.isConstexpr()). static_assert ниже — РЕАЛЬНАЯ проверка на
-        этапе компиляции: функция должна остаться буквально неизменной."""
+        """Баг #9: constexpr-функция не должна получать датчик — __TRACE_FN()
+        вызывает обычную (не constexpr) __trace_enter(), что ломает
+        constexpr-вычислимость функции и даёт каскад ошибок в любом
+        зависимом constexpr-контексте/шаблоне. ФО легитимен в статике, но
+        без датчика. static_assert ниже — проверка на этапе компиляции:
+        функция должна остаться буквально неизменной."""
         src = (cpp_branches_instrumented_src / "advanced_demo.cpp").read_text(encoding="utf-8")
         assert re.search(
             r"constexpr int constexpr_square\(int x\) \{\s*\n\s*return x \* x;\s*\n\}", src), (

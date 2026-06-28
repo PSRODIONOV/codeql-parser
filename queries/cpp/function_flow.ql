@@ -162,21 +162,127 @@ int getElseHasBlock(Stmt s) {
   result = 0
 }
 
-/** Позиция символа начала тела ({) — столбец (1-based), иначе 0 */
-int getInsCol(Stmt s) {
-  s instanceof IfStmt and result = s.(IfStmt).getThen().getLocation().getStartColumn()
+// ── Геометрия вставки датчика ветви ──────────────────────────────────────
+
+/** Тело ветви, куда ставится датчик (then у if, тело цикла, try-блок). */
+Stmt branchBody(Stmt s) {
+  result = s.(IfStmt).getThen()
   or
-  s instanceof WhileStmt and result = s.(WhileStmt).getStmt().getLocation().getStartColumn()
+  result = s.(ForStmt).getStmt()
   or
-  s instanceof ForStmt and result = s.(ForStmt).getStmt().getLocation().getStartColumn()
+  result = s.(WhileStmt).getStmt()
   or
-  s instanceof DoStmt and result = s.(DoStmt).getStmt().getLocation().getStartColumn()
+  result = s.(DoStmt).getStmt()
   or
-  s instanceof TryStmt and result = s.(TryStmt).getStmt().getLocation().getStartColumn()
+  result = s.(TryStmt).getStmt()
+}
+
+/** Тело else-ветки (plain else, НЕ else-if — там getElse() — IfStmt). */
+Stmt elseBody(Stmt s) {
+  result = s.(IfStmt).getElse() and
+  not result instanceof IfStmt
+}
+
+/** Последний (по тексту) catch-обработчик данного TryStmt. */
+predicate isLastHandler(TryStmt t, Handler h) {
+  h.getTryStmt() = t and
+  not exists(Handler h2 |
+    h2.getTryStmt() = t and
+    h2.getLocation().getStartLine() > h.getLocation().getStartLine()
+  )
+}
+
+/**
+ * Истинный конец оператора body (для закрывающей '}' обёртки одиночного
+ * оператора, has_block=0). Для большинства Stmt — body.getLocation().
+ * Для TryStmt без собственных {} вокруг (`while(...) try {...} catch(...){}`)
+ * CodeQL даёт TryStmt.getLocation() только до конца try-блока, без catch —
+ * нужен конец последнего catch-блока.
+ */
+predicate properStmtEnd(Stmt body, int endLine, int endCol) {
+  not body instanceof TryStmt and
+  endLine = body.getLocation().getEndLine() and
+  endCol = body.getLocation().getEndColumn()
   or
-  not s instanceof IfStmt and not s instanceof WhileStmt and not s instanceof ForStmt
-    and not s instanceof DoStmt and not s instanceof TryStmt and
-  result = 0
+  exists(Handler last | isLastHandler(body, last) |
+    endLine = last.getBlock().getLocation().getEndLine() and
+    endCol = last.getBlock().getLocation().getEndColumn()
+  )
+}
+
+/**
+ * constexpr-функция: __TRACE() вызывает обычную (не constexpr)
+ * __trace_branch() — вставка в constexpr-вычисляемую функцию даёт каскад
+ * ошибок компиляции. Ветвь остаётся в Перечень_ветвей, просто без геометрии.
+ */
+predicate noSensor(Stmt s) { s.getEnclosingFunction().isConstexpr() }
+
+int insLine(Stmt s) {
+  not noSensor(s) and exists(branchBody(s)) and result = branchBody(s).getLocation().getStartLine()
+  or
+  not noSensor(s) and s instanceof SwitchCase and result = s.(SwitchCase).getLocation().getEndLine()
+  or
+  (noSensor(s) or (not exists(branchBody(s)) and not s instanceof SwitchCase)) and result = 0
+}
+
+int insCol(Stmt s) {
+  not noSensor(s) and exists(branchBody(s)) and result = branchBody(s).getLocation().getStartColumn()
+  or
+  // 1-based позиция символа ПОСЛЕ ':' метки case/default.
+  not noSensor(s) and s instanceof SwitchCase and result = s.(SwitchCase).getLocation().getEndColumn() + 1
+  or
+  (noSensor(s) or (not exists(branchBody(s)) and not s instanceof SwitchCase)) and result = 0
+}
+
+/** has_block: 1 — тело в `{...}`, 0 — одиночный оператор, 2 — case/default. */
+int hasBlockGeom(Stmt s) {
+  not noSensor(s) and branchBody(s) instanceof BlockStmt and result = 1
+  or
+  not noSensor(s) and exists(branchBody(s)) and not branchBody(s) instanceof BlockStmt and result = 0
+  or
+  not noSensor(s) and s instanceof SwitchCase and result = 2
+  or
+  (noSensor(s) or (not exists(branchBody(s)) and not s instanceof SwitchCase)) and result = 0
+}
+
+int endLine(Stmt s) {
+  not noSensor(s) and exists(branchBody(s)) and exists(int l | properStmtEnd(branchBody(s), l, _) | result = l)
+  or
+  not noSensor(s) and s instanceof SwitchCase and result = s.(SwitchCase).getLocation().getEndLine()
+  or
+  (noSensor(s) or (not exists(branchBody(s)) and not s instanceof SwitchCase)) and result = 0
+}
+
+int endCol(Stmt s) {
+  not noSensor(s) and exists(branchBody(s)) and exists(int c | properStmtEnd(branchBody(s), _, c) | result = c)
+  or
+  not noSensor(s) and s instanceof SwitchCase and result = s.(SwitchCase).getLocation().getEndColumn()
+  or
+  (noSensor(s) or (not exists(branchBody(s)) and not s instanceof SwitchCase)) and result = 0
+}
+
+int elseInsLine(Stmt s) {
+  not noSensor(s) and exists(elseBody(s)) and result = elseBody(s).getLocation().getStartLine()
+  or
+  (noSensor(s) or not exists(elseBody(s))) and result = 0
+}
+
+int elseInsCol(Stmt s) {
+  not noSensor(s) and exists(elseBody(s)) and result = elseBody(s).getLocation().getStartColumn()
+  or
+  (noSensor(s) or not exists(elseBody(s))) and result = 0
+}
+
+int elseEndLine(Stmt s) {
+  not noSensor(s) and exists(elseBody(s)) and exists(int l | properStmtEnd(elseBody(s), l, _) | result = l)
+  or
+  (noSensor(s) or not exists(elseBody(s))) and result = 0
+}
+
+int elseEndCol(Stmt s) {
+  not noSensor(s) and exists(elseBody(s)) and exists(int c | properStmtEnd(elseBody(s), _, c) | result = c)
+  or
+  (noSensor(s) or not exists(elseBody(s))) and result = 0
 }
 
 /** Уникальный ID оператора (файл:строка) */
@@ -222,11 +328,9 @@ where
   // То же для case/default, чей родительский switch порождён макросом.
   not (s instanceof SwitchCase and
        exists(SwitchStmt sw | s.(SwitchCase).getSwitchStmt() = sw | sw.getExpr().isInMacroExpansion())) and
-  // И для САМОЙ метки, даже если switch и его выражение — нет (см. REP8/
-  // REP16 в assembler_x86.cpp: один макровызов `case REP8(0xB8):`
-  // разворачивается в 8 независимых case-меток, физически указывающих на
-  // одно и то же место вызова макроса — см. ту же проверку и подробный
-  // комментарий в probe_points.ql).
+  // И для самой метки, даже если switch и его выражение — нет: один
+  // макровызов вида `case REP8(0xB8):` может разворачиваться в несколько
+  // case-меток, физически указывающих на одно и то же место вызова.
   not (s instanceof SwitchCase and
        (s.isInMacroExpansion() or
         (exists(s.(SwitchCase).getExpr()) and s.(SwitchCase).getExpr().isInMacroExpansion())))
@@ -246,6 +350,9 @@ select
   getElseLine(s) as else_line,
   getElseLineEnd(s) as else_line_end,
   getElseHasBlock(s) as else_has_block,
-  getInsCol(s) as ins_col,
-  getInCatchMarker(s) as in_catch
+  getInCatchMarker(s) as in_catch,
+  insLine(s) as ins_line, insCol(s) as ins_col, hasBlockGeom(s) as has_block,
+  elseInsLine(s) as else_ins_line, elseInsCol(s) as else_ins_col,
+  endLine(s) as end_line, endCol(s) as end_col,
+  elseEndLine(s) as else_end_line, elseEndCol(s) as else_end_col
 order by func_name, line_start

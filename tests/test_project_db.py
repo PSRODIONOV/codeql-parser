@@ -51,9 +51,11 @@ def test_raw_data_roundtrip(proj):
     datasets = {
         "functional": [
             {"qualified_name": "Calculator.add", "name": "add", "parent_type": "Calculator",
-             "file": "calc.py", "line": "10", "kind": "member function"},
+             "file": "calc.py", "line": "10", "kind": "member function",
+             "ins_line": "", "ins_col": "", "end_line": "", "end_col": ""},
             {"qualified_name": "main", "name": "main", "parent_type": "(global)",
-             "file": "main.py", "line": "17", "kind": "function"},
+             "file": "main.py", "line": "17", "kind": "function",
+             "ins_line": "", "ins_col": "", "end_line": "", "end_col": ""},
         ],
         "control": [
             {"caller_name": "main", "callee_name": "Calculator.add",
@@ -63,7 +65,10 @@ def test_raw_data_roundtrip(proj):
             {"func_name": "Calculator.div", "func_file": "calc.py",
              "stmt_id": "calc.py:25", "line_start": "25",
              "line_end": "25", "stmt_type": "if", "stmt_label": "if (b == 0)",
-             "else_line": "", "in_catch": "0"},
+             "else_line": "", "else_line_end": "", "else_has_block": "",
+             "in_catch": "0", "ins_line": "", "ins_col": "",
+             "has_block": "", "else_ins_line": "", "else_ins_col": "",
+             "end_line": "", "end_col": "", "else_end_line": "", "else_end_col": ""},
         ],
     }
     proj.save_raw_data(datasets)
@@ -79,28 +84,31 @@ def test_raw_data_roundtrip(proj):
 
 def test_all_datasets_known():
     # ключи наборов должны совпадать с тем, что использует main.py / project_runner.
-    # 'probe' — геометрия точек вставки датчиков (probe_points.ql), собирается в
-    # сырые данные для инструментации без отдельного запроса (см. instrument_cpp.py).
+    # Геометрия входа/выхода и ветвей для ОБОИХ языков (java/cpp) считается
+    # прямо в functional_objects.ql/function_flow.ql (один источник истины
+    # вместо отдельного probe_points.ql, удалённого для обоих языков);
+    # единственный осколок, не уместившийся туда — геометрия catch (try может
+    # иметь несколько catch-клауз), отдельный набор 'catch' (см.
+    # queries/java/catch_points.ql, queries/cpp/catch_points.ql).
     assert set(DATASET_TABLE) == {
         "functional", "info", "files", "signature", "control",
-        "data", "arg_flow", "file_flow", "flow", "probe",
+        "data", "arg_flow", "file_flow", "flow", "catch",
     }
 
 
-def test_probe_dataset_roundtrip(proj):
-    """Геометрия точек вставки датчиков (раздел 'probe') сохраняется/читается
-    из project.db 1:1 — инструментатор берёт её отсюда без отдельного запроса."""
-    probe = [
-        {"kind": "entry", "func": "f", "file": "a.cpp", "ref_line": "5",
-         "ins_line": "5", "ins_col": "10", "has_block": "1", "btype": "-",
-         "end_line": "9", "end_col": "1"},
-        {"kind": "branch", "func": "f", "file": "a.cpp", "ref_line": "6",
-         "ins_line": "6", "ins_col": "16", "has_block": "0", "btype": "if",
-         "end_line": "6", "end_col": "20"},
+def test_catch_dataset_roundtrip(proj):
+    """Геометрия точек вставки catch (раздел 'catch') сохраняется/читается
+    из project.db 1:1 — try может иметь несколько catch-клауз, каждая со
+    своим номером ветви (см. queries/cpp/catch_points.ql)."""
+    catch = [
+        {"func": "f", "file": "a.cpp", "ref_line": "5",
+         "ins_line": "6", "ins_col": "10", "end_line": "9", "end_col": "1"},
+        {"func": "f", "file": "a.cpp", "ref_line": "5",
+         "ins_line": "10", "ins_col": "10", "end_line": "13", "end_col": "1"},
     ]
-    proj.save_raw_data({"probe": probe})
+    proj.save_raw_data({"catch": catch})
     loaded = proj.load_raw_data()
-    assert loaded["probe"] == probe
+    assert loaded["catch"] == catch
 
 
 def test_derived_roundtrip(proj):

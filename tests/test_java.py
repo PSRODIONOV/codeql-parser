@@ -1,17 +1,15 @@
 """Регресс Java-инструментатора (small-projects/test-project-java-branches).
 
-Проект расширен до паритета по охвату с test-project-cpp-branches (см.
-docs/PRINCIPLES_C_CPP.md): if/else, for/while/do, switch case/default
-(fallthrough-группы), try/catch/finally (catch делит № ветви с try — датчик
-покрытия, не отдельная ветвь, см. probe_points.ql), вложенность, и
-негативы — enhanced-for, тернарный ?:, && / || (НЕ дают ветвей). Покрывает:
+Паритет по охвату с test-project-cpp-branches (см. docs/PRINCIPLES_C_CPP.md):
+if/else, for/while/do, switch case/default (fallthrough-группы),
+try/catch/finally, вложенность, и негативы — enhanced-for, тернарный ?:,
+&& / || (не дают ветвей). Покрывает:
   • определение ветвей (Перечень_ветвей.csv): if/else/for/while/do/try/
-    case/default — паритет типов с C++ (см. queries/cpp/function_flow.ql);
+    catch/case/default — паритет типов с C++ (см. queries/cpp/function_flow.ql);
   • дисамбигуация перегрузки helper()/helper(int) — общий qname
     "branches.BranchDemo.helper", разные № ФО (см. _lookup_fo);
   • датчики (Карта_датчиков.csv): вход/выход у каждого ФО, явный super(),
-    else как отдельный датчик (делит № ветви с if), catch (делит № ветви
-    с try, НЕ попадает в Перечень_ветвей — датчик покрытия);
+    else и catch — отдельные датчики со своими номерами ветвей;
   • покрытие (Покрытие_ветвей.csv): все ветви исполняются (Main.java
     вызывает каждый метод так, чтобы сработала каждая ветвь).
 
@@ -28,8 +26,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "dynamic"))
 from instrument_java import (  # noqa: E402
     dedupe_probe_points, _insertion_is_valid,
-    match_file_by_base, match_file_by_relpath,
+    match_file_by_base, match_file_by_relpath, _find_jdk_tool,
 )
+from conftest import load_csv  # noqa: E402
 
 
 def _short(fo: str) -> str:
@@ -44,13 +43,11 @@ def types_of(rows):
     return [r.get("Тип", "") for r in rows]
 
 
-TOTAL_BRANCHES = 81
-# Сенсоры branch-типа в Карта_датчиков.csv = TOTAL_BRANCHES + catch-датчики
-# (catch делит № ветви с try, своей строки в Перечень_ветвей у него нет —
-# см. probe_points.ql и docs/PRINCIPLES_C_CPP.md). 10 catch — по числу
-# CatchClause во всём проекте (simpleTry:1, tryMultipleCatch:3, nestedTry:2,
-# tryWithLoop:1, BranchDemo.tryBranch:1, AdvancedDemo.safeDiv:1,
-# Pipeline.process:1; tryFinally — без catch, 0).
+# catch — обычная строка Перечень_ветвей.csv (Тип=catch) со своим номером
+# ветви, не общим с try. 81 "обычных" ветвей + 10 catch-клауз (simpleTry:1,
+# tryMultipleCatch:3, nestedTry:2, tryWithLoop:1, BranchDemo.tryBranch:1,
+# AdvancedDemo.safeDiv:1, Pipeline.process:1; tryFinally — без catch, 0) = 91.
+TOTAL_BRANCHES = 91
 TOTAL_CATCH_SENSORS = 10
 
 
@@ -67,7 +64,8 @@ class TestBranchDetection:
     def test_for_while_try_tracked(self, java_branches_inventory):
         assert types_of(branches_of(java_branches_inventory, "forBranch")) == ["for"]
         assert types_of(branches_of(java_branches_inventory, "whileBranch")) == ["while"]
-        assert types_of(branches_of(java_branches_inventory, "tryBranch")) == ["try"]
+        # try и его catch — обе обычные строки инвентаря, со своими номерами.
+        assert types_of(branches_of(java_branches_inventory, "tryBranch")) == ["try", "catch"]
 
     def test_overloaded_helper_has_no_branches(self, java_branches_inventory):
         """helper()/helper(int) — без веток (тернарный оператор не
@@ -75,27 +73,26 @@ class TestBranchDetection:
         assert branches_of(java_branches_inventory, "helper") == []
 
     def test_do_while_distinct_from_while(self, java_branches_inventory):
-        """do-while должен классифицироваться как 'do', а не слипаться с
-        'while' (баг function_flow.ql: getStmtType конфлировал WhileStmt и
-        DoStmt в одно значение 'while' — паритет с C++ требует, чтобы
-        do-while был отдельным типом, как в probe_points.ql)."""
+        """do-while должен классифицироваться как 'do', а не как 'while' —
+        паритет с C++, где это отдельный тип."""
         assert types_of(branches_of(java_branches_inventory, "doWhileDemo")) == ["do"]
         assert types_of(branches_of(java_branches_inventory, "countDownWhile")) == ["while"]
 
     def test_switch_case_default_tracked(self, java_branches_inventory):
         """Каждая case-метка (включая участников fallthrough-группы) и
         default — отдельная ветвь, паритет с C++ (см.
-        queries/cpp/probe_points.ql: caseBtype/hasBlock=2)."""
+        queries/cpp/function_flow.ql: caseBtype/hasBlock=2)."""
         rows = branches_of(java_branches_inventory, "weekdayKind")
         assert types_of(rows) == ["case"] * 7 + ["default"]
         rows2 = branches_of(java_branches_inventory, "fallthroughSum")
         assert types_of(rows2) == ["case", "case", "default"]
 
     def test_try_catch_finally_nesting(self, java_branches_inventory):
-        """try получает свою ветвь на каждый уровень вложенности; catch и
-        finally — НЕ отдельные ветви (нет точки решения, см. getInCatchMarker
-        / docs/PRINCIPLES_C_CPP.md)."""
-        assert types_of(branches_of(java_branches_inventory, "nestedTry")) == ["try", "try", "if"]
+        """try получает свою ветвь на каждый уровень вложенности; catch —
+        тоже отдельная ветвь со своим номером; finally — не ветвь
+        (нет точки решения, см. getInCatchMarker)."""
+        assert types_of(branches_of(java_branches_inventory, "nestedTry")) == \
+            ["try", "try", "if", "catch", "catch"]
         assert types_of(branches_of(java_branches_inventory, "tryFinally")) == ["try"]
 
     def test_enhanced_for_and_logical_ops_are_negatives(self, java_branches_inventory):
@@ -125,7 +122,8 @@ class TestBranchDetection:
         assert types_of(branches_of(java_branches_inventory, "aboveThreshold")) == ["if"]
         assert types_of(branches_of(java_branches_inventory, "classify")) == ["for", "if"]
         assert types_of(branches_of(java_branches_inventory, "normalize")) == ["while", "do"]
-        assert types_of(branches_of(java_branches_inventory, "process")) == ["try", "if", "if"]
+        assert types_of(branches_of(java_branches_inventory, "process")) == \
+            ["try", "if", "if", "catch"]
 
 
 class TestSensorMap:
@@ -158,39 +156,46 @@ class TestSensorMap:
         assert entries and entries == exits
 
     def test_branch_sensors_numbered(self, java_branches_sensors):
-        """branch-датчиков больше, чем строк в Перечень_ветвей, ровно на
-        число catch-обработчиков: else получает СВОЙ датчик (делит № ветви
-        с if — см. test_else_sensor_shares_branch_num_with_if), а catch
-        делит № ветви с try и добавляет датчик ПОКРЫТИЯ сверх
-        TOTAL_BRANCHES (своей строки в Перечень_ветвей у catch нет)."""
+        """Число branch-датчиков (не вход/выход) ровно совпадает с
+        Перечень_ветвей.csv — у каждой физической позиции свой номер и своя
+        строка, лишних датчиков без строки инвентаря не остаётся."""
         branch_rows = [r for r in java_branches_sensors if r.get("Запись (br)") not in ("0", "-1")]
-        assert len(branch_rows) == TOTAL_BRANCHES + TOTAL_CATCH_SENSORS
+        assert len(branch_rows) == TOTAL_BRANCHES
 
-    def test_else_sensor_shares_branch_num_with_if(self, java_branches_sensors):
-        """Паритет с C++: else получает СВОЙ датчик (своя строка/позиция в
-        исходнике), но № ветви — ТОТ ЖЕ, что у if (одна точка решения, два
-        исхода), см. queries/java/probe_points.ql: elseBlock/btype='else'."""
+    def test_else_sensor_has_own_branch_num_distinct_from_if(self, java_branches_sensors):
+        """else не должен делить № ветви с if: Cqtrace.hit(fo,br) должен
+        быть разным для then- и else-блока, иначе Покрытие_ветвей.csv/
+        маршруты не отличат, какой из них выполнился."""
         ifs = [r for r in java_branches_sensors if r.get("Тип") == "if"]
         elses = [r for r in java_branches_sensors if r.get("Тип") == "else"]
         assert ifs and elses
         if_branch = next(r for r in ifs if r.get("№ ФО") == elses[0].get("№ ФО"))
-        assert if_branch.get("Запись (br)") == elses[0].get("Запись (br)")
+        assert if_branch.get("Запись (br)") != elses[0].get("Запись (br)"), (
+            "else не должен делить № ветви с if")
 
-    def test_catch_sensor_shares_branch_num_with_try_not_in_inventory(
+    def test_catch_sensor_has_own_branch_num_and_own_inventory_row(
             self, java_branches_sensors, java_branches_inventory):
-        """catch — датчик ПОКРЫТИЯ: есть в Карта_датчиков.csv (делит № ветви
-        с try того же TryStmt), но НЕТ собственной строки в
-        Перечень_ветвей.csv (не точка решения — вход определяется
-        исключением, а не кодом), паритет с C++."""
+        """Каждая catch-клауза должна иметь свой номер и свою строку
+        инвентаря — try может иметь несколько catch (см. tryMultipleCatch),
+        и у всех номера разные."""
         catches = [r for r in java_branches_sensors if r.get("Тип") == "catch"]
         assert len(catches) == TOTAL_CATCH_SENSORS
-        assert all(r.get("Тип") == "catch" for r in catches)
-        assert not [r for r in java_branches_inventory if r.get("Тип") == "catch"], (
-            "catch не должен попадать в Перечень_ветвей")
+        inv_catches = [r for r in java_branches_inventory if r.get("Тип") == "catch"]
+        assert len(inv_catches) == TOTAL_CATCH_SENSORS, (
+            "catch должен иметь собственную строку в Перечень_ветвей")
         tries = {r.get("№ ФО"): r.get("Запись (br)")
                  for r in java_branches_sensors if r.get("Тип") == "try"}
         for c in catches:
-            assert tries.get(c.get("№ ФО")) is not None
+            try_num = tries.get(c.get("№ ФО"))
+            assert try_num is not None
+            assert c.get("Запись (br)") != try_num, (
+                "catch не должен делить № ветви с try")
+        # tryMultipleCatch — несколько catch на один try, у всех РАЗНЫЕ номера
+        nums_by_fo: dict = {}
+        for c in catches:
+            nums_by_fo.setdefault(c.get("№ ФО"), set()).add(c.get("Запись (br)"))
+        assert any(len(v) >= 3 for v in nums_by_fo.values()), (
+            "tryMultipleCatch (3 catch) должен дать 3 РАЗНЫХ номера ветви")
 
 
 class TestCoverage:
@@ -236,15 +241,13 @@ class TestInstrumentorRegressionBugs:
             assert src.count("{") == src.count("}"), f"{fname}: несбалансированные {{}}"
 
     def test_sensor_call_uses_simple_name_not_qualified_path(self, java_branches_instrumented_src):
-        """Баг (реальный проект, gen_profile/gosjava-класс): датчик НЕ должен
-        вставляться как полный путь '<pkg>.Cqtrace.hit(...)' — первый сегмент
-        пакета (com/sun/se/spi и т.п.) резолвится Java как ОБЫЧНОЕ простое
-        имя, и если в области видимости есть локальная переменная/параметр с
-        этим же именем (частый случай: 'String com = ...;'), компилятор
-        трактует 'com.sun....' как доступ к полю на этой переменной, а не
-        как путь к пакету — гарантированная ошибка компиляции (см.
-        ConstantSetNode.java: 'String com = constantMap.get(key); if (com ==
-        null) { com.sun....hit(...)'). Вместо этого должен использоваться
+        """Датчик не должен вставляться как полный путь
+        '<pkg>.Cqtrace.hit(...)' — первый сегмент пакета (com/sun/se/spi и
+        т.п.) резолвится Java как обычное простое имя, и если в области
+        видимости есть локальная переменная/параметр с этим же именем
+        (напр. 'String com = ...;'), компилятор трактует 'com.sun....' как
+        доступ к полю на этой переменной, а не как путь к пакету — ошибка
+        компиляции. Вместо этого должен использоваться
         import + простое имя типа 'Cqtrace.hit(...)' — оно не подменяется
         переменной с другим именем."""
         for fname in ("BranchDemo.java", "Main.java", "OtherDemo.java"):
@@ -256,20 +259,16 @@ class TestInstrumentorRegressionBugs:
                 f"— риск коллизии с локальной переменной 'branches'")
 
     def test_recommended_bootstrap_blacklist_via_sensor_filter(self):
-        """Баг (реальный проект, full-coverage JDK): датчик в java.lang/
-        java.util.concurrent вызывается на раннем bootstrap JVM, до
-        готовности VM диспетчеризовать вызов метода — нативный SIGSEGV (не
-        лечится re-entrancy guard / catch(Throwable) в Cqtrace.hit() — тело
-        не успевает начать исполняться). Реальный краш (pc=0x0 SIGSEGV на
-        старте, gosjava) указал именно на java/lang/ref/* (Reference/
-        Finalizer/WeakReference/... — управление GC/финализацией).
+        """Датчик в java.lang/java.util.concurrent вызывается на раннем
+        bootstrap JVM, до готовности VM диспетчеризовать вызов метода —
+        нативный SIGSEGV (тело Cqtrace.hit() не успевает начать
+        исполняться). java/lang/ref/* (Reference/Finalizer/WeakReference —
+        управление GC/финализацией) особенно чувствителен.
 
-        Раньше это было встроено в код (_is_bootstrap_path/_BOOTSTRAP_RX).
-        Теперь — настраиваемый чёрный список ВСТАВКИ ДАТЧИКОВ (вкладка
-        «Динамический анализ», sensor_filter_factory в core/file_lists.py):
-        этот тест документирует РЕКОМЕНДУЕМЫЕ шаблоны для проектов,
-        собирающих сам JDK (как gosjava), и проверяет, что они дают тот же
-        эффект, что и прежняя встроенная защита."""
+        Настраиваемый чёрный список вставки датчиков (вкладка «Динамический
+        анализ», sensor_filter_factory в core/file_lists.py): этот тест
+        документирует рекомендуемые шаблоны для проектов, собирающих сам
+        JDK (как gosjava)."""
         from core.file_lists import sensor_filter_factory
         recommended_exclude = ["java/lang/*", "java/util/concurrent/*"]
         f = sensor_filter_factory(None, recommended_exclude)
@@ -299,13 +298,12 @@ class TestInstrumentorRegressionBugs:
             assert f(p), f"{p}: НЕ должен быть исключён"
 
     def test_dedupe_probe_points_drops_identical_geometry(self):
-        """Общий случай: CodeQL вернул две разные Callable-сущности с
-        ПОЛНОСТЬЮ идентичной геометрией (вырожденный/непредвиденный кейс,
-        НЕ пара <clinit>/<obinit> — см. отдельный тест ниже про неё). Это
-        настоящая аномалия — без дедупликации лишняя строка добавляла бы
-        ЕЩЁ ОДНУ вставку в ту же позицию (напр. один try получал бы два
-        finally — невалидный синтаксис), и такой дубль должен СЧИТАТЬСЯ
-        (попадать в лог "Дубликатов отброшено")."""
+        """Две разные Callable-сущности с полностью идентичной геометрией
+        (не пара <clinit>/<obinit> — см. отдельный тест ниже) — настоящая
+        аномалия. Без дедупликации лишняя строка добавила бы ещё одну
+        вставку в ту же позицию (напр. один try получил бы два finally —
+        невалидный синтаксис); дубль должен попадать в лог "Дубликатов
+        отброшено"."""
         pts = [
             {"kind": "entry", "func": "a.B.m", "file": "B.java", "ref_line": 10,
              "open_line": 10, "open_col": 20, "close_line": 15, "close_col": 5, "btype": "-"},
@@ -321,14 +319,12 @@ class TestInstrumentorRegressionBugs:
         assert logged, "настоящая аномалия дублирования ДОЛЖНА попадать в лог"
 
     def test_dedupe_probe_points_silently_drops_clinit_obinit_collision(self):
-        """Подтверждённый реальный кейс (gosjava-java, прогон probe_points.ql
-        напрямую против CodeQL-БД): класс БЕЗ единого написанного в исходнике
-        static{}/instance-блока (напр. только static final поля-константы)
-        получает синтетическую пару <clinit>+<obinit> с ОДНОЙ И ТОЙ ЖЕ
-        вырожденной геометрией (привязанной к открывающей скобке самого
-        класса, не к какому-либо блоку, 1628 таких пар на gosjava-java). Ни
-        один из них не присутствует в исходнике в явном виде — такой дубль
-        дропается МОЛЧА, не засоряя "Дубликатов отброшено" ложной тревогой."""
+        """Класс без явного static{}/instance-блока в исходнике (напр.
+        только static final поля-константы) получает синтетическую пару
+        <clinit>+<obinit> с одной и той же вырожденной геометрией
+        (привязанной к открывающей скобке класса). Ни один из них не
+        присутствует в исходнике в явном виде — такой дубль дропается
+        молча, не засоряя "Дубликатов отброшено" ложной тревогой."""
         pts = [
             {"kind": "entry", "func": "a.B.<clinit>", "file": "B.java", "ref_line": 10,
              "open_line": 10, "open_col": 20, "close_line": 10, "close_col": 21, "btype": "-"},
@@ -341,14 +337,13 @@ class TestInstrumentorRegressionBugs:
         assert not logged, "коллизия <clinit>/<obinit> НЕ должна попадать в лог"
 
     def test_jar_build_survives_stale_directory_at_target_path(self, tmp_path):
-        """Баг (реальный проект, повторная инструментация в тот же --out без
-        очистки workspace): если предыдущий прогон упал РОВНО на шаге `jar
-        -cf cqtrace-runtime.jar` (исключение из check=True прерывает скрипт
-        ДО финальной чистки .cqtrace_jar_build), на месте jar-файла может
-        остаться каталог — `jar` падает 'Cannot create a file when that
-        file already exists' на КАЖДОМ следующем прогоне. Сюда вынесена та
-        же логика очистки, что в instrument_java.py перед вызовом `jar -cf`
-        (см. main()) — реальный вызов `jar`, без мока."""
+        """При повторной инструментации в тот же --out без очистки
+        workspace на месте jar-файла может остаться каталог (если
+        предыдущий прогон прервался на шаге `jar -cf`) — `jar` падает
+        'Cannot create a file when that file already exists' на каждом
+        следующем прогоне. Проверяет ту же логику очистки, что
+        instrument_java.py делает перед вызовом `jar -cf` (см. main()) —
+        реальный вызов `jar`, без мока."""
         if shutil.which("jar") is None or shutil.which("javac") is None:
             pytest.skip("jar/javac не найдены в PATH")
         classes = tmp_path / "classes"
@@ -371,18 +366,15 @@ class TestInstrumentorRegressionBugs:
         assert target.is_file(), "целевой путь должен стать обычным файлом jar"
 
     def test_insertion_validity_catches_token_split(self):
-        """Баг (реальный проект, corba/.../ObjectStreamClass.getFields()):
-        недостоверная геометрия CodeQL подставила позицию ВНУТРИ идентификатора
-        — вставка датчика разрезала "getFields" на "getField" + код + "s()",
-        а закрывающая — "length" на "l" + код + "ength" (внутри ДРУГОГО
-        оператора if глубоко в теле метода). Без проверки на границу токена
-        датчик вставлялся БЕЗ ВАЛИДАЦИИ, портя синтаксис файла."""
+        """Недостоверная геометрия CodeQL может подставить позицию внутри
+        идентификатора — вставка датчика разрезала бы "getFields" на
+        "getField" + код + "s()". Без проверки границы токена датчик
+        вставлялся бы без валидации, портя синтаксис файла."""
         sig = "    public ObjectStreamField[] getFields() {"
-        # Открывающая вставка ДОЛЖНА идти сразу после '{' сигнатуры метода.
+        # Открывающая вставка должна идти сразу после '{' сигнатуры метода.
         brace_idx = sig.index("{")
         assert _insertion_is_valid(sig, brace_idx + 1, prio=0)
-        # Координата CodeQL указывает внутрь "getFields" (после "getField") —
-        # ровно воспроизводит реальный кейс ("getField" + датчик + "s()").
+        # Координата CodeQL указывает внутрь "getFields" (после "getField").
         bad_open = sig.index("getFields") + len("getField")
         assert not _insertion_is_valid(sig, bad_open, prio=0)
 
@@ -397,16 +389,10 @@ class TestInstrumentorRegressionBugs:
         assert _insertion_is_valid(closer, closer.index("}"), prio=1)
 
     def test_match_file_rejects_basename_collision_with_excluded_file(self):
-        """Баг (реальный проект, gosjava): java/lang/CharacterData.java
-        (исключён из охвата извлечения фильтром) и
-        org/w3c/dom/CharacterData.java (обычный файл, входит в охват) — РАЗНЫЕ
-        файлы с ОДИНАКОВЫМ basename. Старый match_file() при единственном
-        кандидате по basename возвращал его БЕЗ проверки совпадения хвоста
-        пути — геометрия первого (физически отсутствующего в --out из-за
-        исключения) файла применялась ко второму, случайно подвернувшемуся по
-        имени, и портила его на произвольных байтовых позициях (внутрь
-        javadoc, внутрь идентификаторов вида "setData" -> "setD<датчик>ata").
-        Теперь при единственном кандидате тоже обязательна проверка хвоста —
+        """java/lang/CharacterData.java (исключён из охвата извлечения
+        фильтром) и org/w3c/dom/CharacterData.java (обычный файл, входит в
+        охват) — разные файлы с одинаковым basename. При единственном
+        кандидате по basename обязательна проверка совпадения хвоста пути —
         несовпадение должно возвращать None (точка пропускается), а не
         чужой файл."""
         by_base = {
@@ -421,7 +407,7 @@ class TestInstrumentorRegressionBugs:
         assert match_file_by_base(probe_path, by_base) is None
 
         # Контрольный пример: путь действительно совпадает хвостом —
-        # единственный кандидат должен находиться, как и раньше.
+        # единственный кандидат должен находиться.
         real_path = "/tmp/java_build.X/proj/jaxp/src/org/w3c/dom/CharacterData.java"
         assert match_file_by_base(real_path, by_base) == Path(
             "/out/proj/jaxp/src/org/w3c/dom/CharacterData.java")
@@ -456,9 +442,8 @@ class TestInstrumentorRegressionBugs:
     def test_match_file_by_relpath_falls_back_when_file_not_extracted(self):
         """java/lang/CharacterData.java bootstrap-исключён — в by_relpath его
         нет вовсе (физически не извлекался). Точное совпадение не находит
-        ничего -> откат на match_file_by_base, который (после фикса) тоже
-        корректно возвращает None, а не чужой org/w3c/dom/CharacterData.java
-        (воспроизводит реальный кейс gosjava целиком, через прод-функцию)."""
+        ничего -> откат на match_file_by_base, который должен корректно
+        вернуть None, а не чужой org/w3c/dom/CharacterData.java."""
         prefix = "tmp/java_build.X/"
         by_relpath = {
             "proj/jaxp/src/org/w3c/dom/CharacterData.java":
@@ -474,19 +459,14 @@ class TestInstrumentorRegressionBugs:
         assert match_file_by_relpath(lang_probe, prefix, by_relpath, by_base) is None
 
     def test_macro_filter_resolves_basename_collision(self, tmp_path):
-        """Баг (реальный проект, gosjava): org.omg.CORBA.StringSeqHelper.java
-        и com/sun/corba/se/spi/activation/RepositoryPackage/StringSeqHelper.java
-        — ДВА файла с ОДИНАКОВЫМ basename StringSeqHelper.java в разных
-        каталогах src.zip. read_source_snapshot индексировал ТОЛЬКО по
-        basename — первый попавшийся файл отдавался ДЛЯ ОБОИХ путей.
-        filter_macro_synthesized_fo сверял имя настоящих методов (insert/
-        extract/read) со строкой ЧУЖОГО файла, не находил совпадения и
-        ложно решал, что имя "собрано макросом" — теряя реальные ФО (хотя
-        у Java вообще нет макросов; этот фильтр для Java теперь не
-        запускается вовсе, см. project_runner.py/main.py — но сам
-        read_source_snapshot/filter_macro_synthesized_fo общий с cpp/c,
-        и баг бил бы по cpp/c projects ровно так же при коллизии
-        basename, поэтому фиксится и проверяется независимо от языка)."""
+        """Два файла с одинаковым basename (StringSeqHelper.java) в разных
+        каталогах src.zip. read_source_snapshot индексирует по
+        относительному пути, не только по basename — иначе
+        filter_macro_synthesized_fo сверял бы имя настоящих методов
+        (insert/extract/read) со строкой чужого файла и ложно решал, что
+        имя "собрано макросом". Этот фильтр для Java не запускается (нет
+        макросов), но read_source_snapshot/filter_macro_synthesized_fo
+        общий с cpp/c, поэтому проверяется независимо от языка."""
         import sys, zipfile
         from pathlib import Path as _Path
         sys.path.insert(0, str(_Path(__file__).parent.parent))
@@ -522,3 +502,77 @@ class TestInstrumentorRegressionBugs:
         assert len(out) == 1, (
             "реальный метод insert НЕ должен быть исключён из-за коллизии "
             "basename с одноимённым файлом в другом пакете")
+
+
+class TestCoveragePrecision:
+    """else и catch имеют свой номер ветви, не общий с if/try —
+    Cqtrace.hit(fo,br) должен быть разным для физически разных позиций.
+
+    Эти тесты прогоняют два разных сценария выполнения (только if-ветвь /
+    только else-ветвь) через реально скомпилированный и запущенный
+    инструментированный код и проверяют, что Покрытие_ветвей.csv корректно
+    различает, что произошло — статический разбор кода тут не доказателен."""
+
+    @staticmethod
+    def _compile_and_run(java_branches_instrumented_src, tmp_path, javac, java, arg):
+        classes = tmp_path / "classes"
+        if not classes.exists():
+            classes.mkdir()
+            java_files = [str(p) for p in java_branches_instrumented_src.rglob("*.java")]
+            subprocess.run([javac, "-d", str(classes), "-encoding", "utf-8"] + java_files,
+                          check=True, capture_output=True, text=True)
+            driver = tmp_path / "Driver.java"
+            driver.write_text(
+                "package branches;\n"
+                "public class Driver {\n"
+                "    public static void main(String[] a) {\n"
+                "        AdvancedDemo ad = new AdvancedDemo();\n"
+                "        if (a.length > 0 && a[0].equals(\"A\")) ad.classifyEmpty(5);\n"
+                "        else ad.classifyEmpty(-5);\n"
+                "    }\n"
+                "}\n",
+                encoding="utf-8")
+            subprocess.run([javac, "-d", str(classes), "-cp", str(classes),
+                            "-encoding", "utf-8", str(driver)], check=True, capture_output=True, text=True)
+        home = tmp_path / f"home_{arg}"
+        home.mkdir()
+        subprocess.run([java, f"-Duser.home={home}", "-cp", str(classes), "branches.Driver", arg],
+                       check=True, capture_output=True, text=True)
+        return home
+
+    @staticmethod
+    def _branch_status(out_dir, branch_type):
+        rows = load_csv(out_dir / "Покрытие_ветвей.csv")
+        row = next(r for r in rows if r.get("ФО", "").endswith("classifyEmpty")
+                   and r.get("Тип") == branch_type)
+        return row.get("Покрыта", "").strip()
+
+    def test_if_else_coverage_distinguishes_scenarios(
+            self, java_branches_instrumented_src, tmp_path):
+        javac, java = _find_jdk_tool("javac"), _find_jdk_tool("java")
+        if not javac or not java:
+            pytest.skip("javac/java не найдены (нет JDK в third-party/jdk*/PATH)")
+        reports_static = java_branches_instrumented_src.parent / "reports" / "static"
+        sensor_map = java_branches_instrumented_src / "Карта_датчиков.csv"
+        if not (reports_static / "Перечень_ветвей.csv").exists() or not sensor_map.exists():
+            pytest.skip("нет статических отчётов/карты датчиков рядом с instrumented-sources")
+
+        home_a = self._compile_and_run(java_branches_instrumented_src, tmp_path, javac, java, "A")
+        home_b = self._compile_and_run(java_branches_instrumented_src, tmp_path, javac, java, "B")
+
+        cov_a, cov_b = tmp_path / "cov_a", tmp_path / "cov_b"
+        for home, out in ((home_a, cov_a), (home_b, cov_b)):
+            subprocess.run([sys.executable, str(Path(__file__).parent.parent / "dynamic" / "coverage_report.py"),
+                            "--traces", str(home), "--reports", str(reports_static),
+                            "--sensor-map", str(sensor_map), "--out", str(out)],
+                           check=True, capture_output=True, text=True)
+
+        # Сценарий A: classifyEmpty(5) -> ТОЛЬКО if. Сценарий B: classifyEmpty(-5) -> ТОЛЬКО else.
+        assert self._branch_status(cov_a, "if") == "да"
+        assert self._branch_status(cov_a, "else") == "нет", (
+            "сценарий A не должен покрывать else — если покрывает, "
+            "if/else всё ещё делят № ветви (регрессия)")
+        assert self._branch_status(cov_b, "if") == "нет", (
+            "сценарий B не должен покрывать if — если покрывает, "
+            "if/else всё ещё делят № ветви (регрессия)")
+        assert self._branch_status(cov_b, "else") == "да"

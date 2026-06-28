@@ -3,12 +3,13 @@
 Тестовый проект на C++ для проверки **поиска ветвей** и их **динамической
 инструментации**. Цель — отразить максимально возможное разнообразие
 операторов ветвления, которые отслеживает инструментатор
-([queries/cpp/probe_points.ql](../../../../queries/cpp/probe_points.ql)).
+([queries/cpp/function_flow.ql](../../../../queries/cpp/function_flow.ql),
+[queries/cpp/catch_points.ql](../../../../queries/cpp/catch_points.ql)).
 
 ## Что отслеживает программа
 
-`probe_points.ql` ставит датчик на тело каждой ветви. Фактически (проверено
-прогоном на этой БД) отслеживаются:
+Датчик ставится на тело каждой ветви. Фактически (проверено прогоном на
+этой БД) отслеживаются:
 
 | Оператор        | Что отслеживается             | Отслеживается? |
 |-----------------|-------------------------------|:--------------:|
@@ -53,7 +54,7 @@
 ## Ожидаемые ветви по функциональным объектам
 
 Нумерация — по порядку следования в исходном коде внутри каждого ФО
-(так же, как их нумерует `probe_points.ql` в `Перечень_ветвей.csv`).
+(так же, как их нумерует `Перечень_ветвей.csv`).
 
 ### if_demo.cpp
 | ФО                | Ветви                                  | Кол-во |
@@ -224,5 +225,5 @@ make
 | 5 | Одна метка `case MACRO(x):` разворачивается макросом в несколько `case` — все указывают на одно место, несколько датчиков ломали текст вокруг общего `:` | `macro_generated_cases`/`CASES4` (`negative_demo.cpp`) | `REP8`/`REP16` (`assembler_x86.cpp`, HotSpot) |
 | 6 | `sensor_map`/`Карта_датчиков.csv` заполнялся ДО того, как стало известно, удастся ли вставить датчик (баг 2/X-macro) — карта лгала о датчиках, которых в коде нет, и портила Покрытие_ФО (ложное «не покрыт» вместо «не инстр.») | те же ФО, что в баге 2 | — (найдено при добавлении регресса для бага 2) |
 | 7 | Макрос — последний аргумент вызова, САМ закрывающий список аргументов и порождающий `if` внутри своего раскрытия (`f(args, CHECK)` -> `f(args, THREAD); if (...) return; ...)`). CodeQL репортует конец одиночного оператора-тела `if` (hasBlock=0) сразу после "CHECK" — ВНУТРИ списка аргументов вызова, а не после настоящего `');'`. Обёртка `{ датчик; ВЫЗОВ }` по такой координате вставляла `}` внутрь аргументов | `check_macro_guard` (`macro_demo.cpp`) | `CHECK`/`CHECK_`/`RETURN`/`TRAPS` (`classFileParser.cpp::classfile_parse_error`, HotSpot) |
-| 8 | `while(...) try {...} catch(...) {...}` без своих `{}` вокруг while (тело while — сам `TryStmt`). CodeQL даёт `TryStmt.getLocation()` только до конца try-блока, БЕЗ catch-обработчика, поэтому закрывающая `}` обёртки одиночного оператора (hasBlock=0) попадала ПРЯМО ПЕРЕД `catch` — он оставался "осиротевшим" вне фигурных скобок while, сборка ломалась (`expected 'catch' before '}' token`). Фикс — `queries/cpp/probe_points.ql::properStmtEnd()` берёт конец ПОСЛЕДНЕГО catch-блока вместо `TryStmt.getLocation()` | `while_try_no_brace` (`exception_demo.cpp`) | `rikdataset.cpp::RIKRasterBand::IReadBlock` (GDAL/RIK) |
-| 9 | `constexpr`-функция получала датчик: `__TRACE_FN()`/`__TRACE()` вызывают обычные (не `constexpr`) `__trace_enter()`/`__trace_hit()`, что ломает constexpr-вычислимость функции — любой зависимый `static_assert`/constexpr-контекст/шаблон ломается каскадом вторичных ошибок компиляции по всей библиотеке. Фикс — `queries/cpp/probe_points.ql` добавляет `not f.isConstexpr()` (и симметрично для enclosing-функции во всех branch-клаузах) — ФО легитимен в статике, но БЕЗ датчика, как самодостаточный макрос | `constexpr_square` (`advanced_demo.cpp`) | `fmt::v8::monostate::monostate()`, `fmt::v8::detail::is_constant_evaluated()` (header-only `fmt`, `osm2pgsql/contrib/fmt`) — снесло сборку всего проекта (100+ ошибок) |
+| 8 | `while(...) try {...} catch(...) {...}` без своих `{}` вокруг while (тело while — сам `TryStmt`). CodeQL даёт `TryStmt.getLocation()` только до конца try-блока, БЕЗ catch-обработчика, поэтому закрывающая `}` обёртки одиночного оператора (hasBlock=0) попадала ПРЯМО ПЕРЕД `catch` — он оставался "осиротевшим" вне фигурных скобок while, сборка ломалась (`expected 'catch' before '}' token`). Фикс — `queries/cpp/function_flow.ql::properStmtEnd()` берёт конец ПОСЛЕДНЕГО catch-блока вместо `TryStmt.getLocation()` | `while_try_no_brace` (`exception_demo.cpp`) | `rikdataset.cpp::RIKRasterBand::IReadBlock` (GDAL/RIK) |
+| 9 | `constexpr`-функция получала датчик: `__TRACE_FN()`/`__TRACE()` вызывают обычные (не `constexpr`) `__trace_enter()`/`__trace_hit()`, что ломает constexpr-вычислимость функции — любой зависимый `static_assert`/constexpr-контекст/шаблон ломается каскадом вторичных ошибок компиляции по всей библиотеке. Фикс — `not f.isConstexpr()` в `functional_objects.ql`/`function_flow.ql` зануляет геометрию (а не исключает строку) — ФО легитимен в статике, но БЕЗ датчика, как самодостаточный макрос | `constexpr_square` (`advanced_demo.cpp`) | `fmt::v8::monostate::monostate()`, `fmt::v8::detail::is_constant_evaluated()` (header-only `fmt`, `osm2pgsql/contrib/fmt`) — снесло сборку всего проекта (100+ ошибок) |

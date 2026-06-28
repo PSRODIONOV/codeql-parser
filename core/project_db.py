@@ -21,7 +21,10 @@ from typing import Any, Dict, List, Optional
 
 # ── Колонки 9 сырых наборов (= as-алиасы в queries/<lang>/*.ql, одинаковы по языкам) ──
 RAW_SCHEMA: Dict[str, List[str]] = {
-    "q_functional": ["qualified_name", "name", "parent_type", "file", "line", "kind"],
+    # ins_line/ins_col/end_line/end_col — геометрия вставки датчика входа/
+    # выхода ФО, считается прямо в functional_objects.ql (оба языка).
+    "q_functional": ["qualified_name", "name", "parent_type", "file", "line", "kind",
+                     "ins_line", "ins_col", "end_line", "end_col"],
     "q_info":       ["qualified_name", "name", "type_name", "file", "line", "kind"],
     "q_files":      ["abs_path", "base_name"],
     "q_signature":  ["cwe", "category", "signature", "function_name", "func_file", "line"],
@@ -34,13 +37,25 @@ RAW_SCHEMA: Dict[str, List[str]] = {
     # func_file обязателен: function_flow.ql его возвращает, дедупликация
     # в codeql_analyzer и группировка операторов по (имя, файл) в генераторах
     # на него опираются — без него одноимённые функции сливаются.
+    # ins_line/ins_col/has_block/else_ins_line/else_ins_col — геометрия
+    # вставки датчика ветви + side-channel для plain-else. end_line/end_col/
+    # else_end_line/else_end_col — конец тела (нужно cpp: одиночные
+    # операторы без {} требуют закрывающей вставки, макро-фоллбэк по
+    # многострочным вызовам — см. queries/cpp/function_flow.ql). else_line_end/
+    # else_has_block — cpp-специфичные side-channel, Java их не считает
+    # (остаются "" при чтении).
     "q_flow":       ["func_name", "func_file", "stmt_id", "line_start", "line_end",
-                     "stmt_type", "stmt_label", "else_line", "in_catch"],
-    # Геометрия точек вставки датчиков (probe_points.ql): вход/выход ФО и ветви.
-    # Хранится в сырых данных, чтобы инструментатор читал её из project.db, а не
-    # выполнял отдельный запрос к CodeQL-БД (см. instrument_cpp.py).
-    "q_probe":      ["kind", "func", "file", "ref_line", "ins_line", "ins_col",
-                     "has_block", "btype", "end_line", "end_col"],
+                     "stmt_type", "stmt_label", "else_line", "else_line_end",
+                     "else_has_block", "in_catch",
+                     "ins_line", "ins_col", "has_block", "else_ins_line", "else_ins_col",
+                     "end_line", "end_col", "else_end_line", "else_end_col"],
+    # Геометрия catch — отдельно от q_flow, т.к. try может иметь несколько
+    # catch, а q_flow — одна строка на один Stmt try. См.
+    # queries/java/catch_points.ql, queries/cpp/catch_points.ql. end_line/
+    # end_col — нужны cpp (макро-фоллбэк в instrument_cpp.py); для java —
+    # настоящие, но не используются.
+    "q_catch":      ["func", "file", "ref_line", "ins_line", "ins_col",
+                     "end_line", "end_col"],
 }
 
 # Сопоставление имени набора в коде (main.py) ↔ таблицы БД
@@ -54,7 +69,7 @@ DATASET_TABLE = {
     "arg_flow":    "q_arg_flow",
     "file_flow":   "q_file_flow",
     "flow":        "q_flow",
-    "probe":       "q_probe",
+    "catch":       "q_catch",
 }
 
 PROJECT_FILE = "project.db"
