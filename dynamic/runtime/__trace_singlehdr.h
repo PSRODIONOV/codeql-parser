@@ -32,7 +32,11 @@
  * слабых символов, лишних побочных эффектов это не создаёт (код прочих
  * копий просто не вызывается).
  *
- * Без pthread (однопоточный сценарий: воркеры — отдельные процессы).
+ * Многопоточные цели (любая программа со своими тредами, не только
+ * форк-воркеры): всё состояние датчика (стек маршрутов, счётчики, таблица
+ * сигнатур, файл трассы) — общее на процесс, поэтому __trace_hit целиком
+ * защищён спинлоком (__cq_lock_acquire/__cq_lock_release, атомарные
+ * встроенные функции GCC/Clang — без зависимости от pthread, см. ниже).
  * Анти-спам: пишем только срабатывания №1,2,4,8,16… (степени двойки) на
  * каждый sid. Трассы: $HOME/<lang>-<ts>-<pid>.log, ротация при 100 МБ.
  */
@@ -97,6 +101,26 @@ static __inline__ void __trace_leave(__trace_g *g) { __trace_hit(g->sx, g->fo, -
 CQ_WEAK unsigned      __cq_cnt[CQ_N + 1];
 CQ_WEAK FILE         *__cq_fp = 0;
 CQ_WEAK unsigned long __cq_bytes = 0;
+
+/* Спинлок на всё состояние __trace_hit (счётчики, стек маршрутов, таблица
+ * сигнатур, файл трассы) — цель может быть многопоточной с самого старта
+ * (напр. VM-тред/GC/JIT-треды HotSpot работают параллельно), и без
+ * синхронизации параллельные __trace_hit гонятся за одними и теми же
+ * индексами/массивами (классический check-then-increment без атомарности),
+ * выходя за границы и портя соседнюю глобальную память. __atomic_* —
+ * встроенные функции GCC/Clang, без зависимости от pthread (датчик
+ * header-only, не должен требовать -lpthread от сборки проекта). */
+CQ_WEAK int __cq_lock = 0;
+
+static void __cq_lock_acquire(void) {
+    while (__atomic_exchange_n(&__cq_lock, 1, __ATOMIC_ACQUIRE)) {
+        /* спин: ожидаем освобождения */
+    }
+}
+
+static void __cq_lock_release(void) {
+    __atomic_store_n(&__cq_lock, 0, __ATOMIC_RELEASE);
+}
 
 static void __cq_rotate(void) {
     char path[1024], ts[32];
@@ -247,16 +271,21 @@ static void __cq_route_event(int fo, int br) { (void)fo; (void)br; }
 extern "C"
 #endif
 CQ_WEAK void __trace_hit(unsigned sid, int fo, int br) {
+    __cq_lock_acquire();
     __cq_route_event(fo, br);             /* фактический маршрут — всегда, до анти-спама */
     if (sid <= (unsigned)CQ_N) {
         unsigned c = ++__cq_cnt[sid];
-        if (c & (c - 1)) return;          /* не степень двойки → пропуск coverage-строки */
+        if (c & (c - 1)) {                /* не степень двойки → пропуск coverage-строки */
+            __cq_lock_release();
+            return;
+        }
     }
     {
         char line[64];
         snprintf(line, sizeof line, "%d:%d\n", fo, br);
         __cq_write(line);
     }
+    __cq_lock_release();
 }
 
 #endif /* CQ_TRACE_H */
