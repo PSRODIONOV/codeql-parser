@@ -112,24 +112,30 @@ public final class Cqtrace {
     }
 
     /**
-     * Защита от повторного входа: при инструментации ЦЕЛОГО проекта (включая
-     * сборку всего JDK) под сенсорами оказываются и java.util.HashMap/
-     * ArrayDeque/ArrayList/ThreadLocal/Writer — классы, на которых построен
-     * ЭТОТ САМЫЙ рантайм. Без защиты hit() → cnt.put()/stack.get()/fp.write()
-     * (инструментированы) → hit() → … бесконечная рекурсия (StackOverflowError).
-     * Гард — ПРОСТОЕ static-поле, а НЕ ThreadLocal/AtomicBoolean/synchronized:
-     * это были бы вызовы методов ДРУГИХ инструментированных классов, то есть
-     * сам гард мог бы рекурсивно вызвать hit() ещё раз. Чтение/запись boolean-
-     * поля — голый доступ без единой invoke-инструкции, рекурсия невозможна
-     * физически. Гард ГЛОБАЛЬНЫЙ (не per-thread): под конкуренцией пересечение
-     * вызовов с другого потока теряет одно событие, а не валит JVM — приемлемая
-     * плата (этот рантайм и так lossy, см. анти-спам по степени двойки ниже).
+     * Защита от повторного входа на ТОМ ЖЕ потоке: при инструментации
+     * целого JDK под сенсорами оказываются и java.util.HashMap/ArrayDeque/
+     * ArrayList/ThreadLocal/Writer, на которых построен этот рантайм —
+     * без защиты hit() → cnt.put()/stack.get()/fp.write() (инструментированы)
+     * → hit() → … бесконечная рекурсия.
+     *
+     * Слот на поток (Thread.currentThread().getId(), нативный метод — не
+     * вызывает других инструментируемых классов, рекурсия физически
+     * невозможна), а НЕ один общий флаг: общий флаг под конкуренцией многих
+     * потоков в тугом цикле даёт лайвлок — поток, успевающий взвести/снять
+     * флаг быстрее остальных, не оставляет другим окна, где флаг снят, и
+     * блокирует их практически навсегда. ThreadLocal/AtomicBoolean/
+     * synchronized тут не годятся по той же причине, что и общий флаг —
+     * сами были бы вызовами методов других инструментируемых классов.
+     * IN_HIT_SLOTS — степень двойки; коллизия слота у двух РАЗНЫХ потоков
+     * возможна (редко теряется одно событие), у потока с самим собой — нет.
      */
-    private static boolean inHit = false;
+    private static final int IN_HIT_SLOTS = 1024;
+    private static final boolean[] inHit = new boolean[IN_HIT_SLOTS];
 
     public static void hit(int fo, int br) {
-        if (inHit) return;
-        inHit = true;
+        int slot = (int) (Thread.currentThread().getId() & (IN_HIT_SLOTS - 1));
+        if (inHit[slot]) return;
+        inHit[slot] = true;
         try {
         routeEvent(fo, br);                      // буфер маршрута — всегда (поток-локально)
         synchronized (lock) {
@@ -151,7 +157,7 @@ public final class Cqtrace {
             // IOException (как в writeLine) — на бутстрапе сценариев больше,
             // чем можно перечислить заранее.
         } finally {
-            inHit = false;
+            inHit[slot] = false;
         }
     }
 }
