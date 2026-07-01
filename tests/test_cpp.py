@@ -11,8 +11,13 @@
 Золотые отчёты: reports/small-projects/cpp-branches/ (пути → basename).
 """
 import re
+import sys
+from pathlib import Path
 import pytest
 from conftest import source_line, get_sig_line
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "dynamic"))
+from _instrument_common import is_reliable_stmt_end as _is_reliable_stmt_end
 
 ALLOWED_TYPES = {"if", "else", "for", "while", "do", "try", "catch", "case", "default"}
 TOTAL_BRANCHES = 115
@@ -458,3 +463,35 @@ class TestInstrumentorRegressionBugs:
         assert re.search(
             r'static_assert\(constexpr_square\(3\) == 9, "[^"]*"\);', src), (
             "static_assert у constexpr_square изменён/удалён")
+
+    def test_check_macro_with_arg_paren_close_not_inserted_inside_call(self):
+        """Баг #10: CHECK_(value) (макрос с аргументами) — вариант идиомы
+        CHECK/TRAPS, где ')' закрывает аргумент MACRO_(arg), а следующий ')'
+        закрывает внешний вызов f(MACRO_(arg)).
+        CodeQL даёт c_col на ВТОРОЙ ')' (внешний вызов): c_ln[c_col-1] = ')'
+        (аргумент макроса) проходит is_reliable_stmt_end, но c_ln[c_col] = ')'
+        (внешний вызов) означает вставку '}' ВНУТРЬ списка аргументов.
+
+        Пример из реального проекта (methodHandles.cpp:133):
+          if (!k->is_initialized())  k->initialize(CHECK_(empty));
+        → инструментатор давал:
+          { __TRACE(...); k->initialize(CHECK_(empty) });
+        Строка с '}' перед ')' — синтаксическая ошибка: '}' внутри скобок.
+
+        Тест проверяет геометрию без запуска инструментатора: демонстрирует
+        ложный позитив старого фильтра и корректность нового условия."""
+        # Строка из реального крашлога
+        line = "  if (!k->is_initialized())  k->initialize(CHECK_(empty));"
+        # c_col = позиция второй ')' (закрывает initialize(), не CHECK_(...))
+        # "  if (!k->is_initialized())  k->initialize(CHECK_(empty)" — 56 символов
+        prefix = "  if (!k->is_initialized())  k->initialize(CHECK_(empty)"
+        c_col = len(prefix)          # 0-based: позиция ')' закрывающей initialize(
+        assert line[c_col] == ')',   "char AT c_col должен быть ')' (outer close paren)"
+        assert line[c_col - 1] == ')', "char BEFORE c_col должен быть ')' (inner macro paren)"
+        # Старый фильтр: is_reliable_stmt_end(c_col-1) — ')' не буква/цифра → True
+        assert _is_reliable_stmt_end(line[c_col - 1]), (
+            "старый check: ')' проходит is_reliable_stmt_end — ложный позитив (это баг)")
+        # Новый фильтр: c_ln[c_col] != ')' — False, пара должна быть отброшена
+        new_check_passes = (c_col >= len(line) or line[c_col] != ')')
+        assert not new_check_passes, (
+            "новый check: ')' AT c_col → пара отброшена (фикс работает)")

@@ -534,8 +534,17 @@ def main():
                 # после настоящего ');' вызова. Вставка "}" по такой
                 # координате попала бы ВНУТРЬ списка аргументов вызова (см.
                 # classfile_parse_error(..., CHECK) в classFileParser.cpp).
+                # Дополнительная проверка: символ AT c_col (то, что окажется
+                # сразу после '}') не должен быть ')' — это признак, что
+                # вставка произошла ВНУТРИ аргументного списка (специфика
+                # макросов-с-аргументами: CHECK_(value), TRAPS_(value) и т.п.,
+                # где ')' закрывающий аргумент макроса — пунктуация и проходит
+                # is_reliable_stmt_end, а следующий ')' закрывает внешний
+                # вызов; вставка '}' между ними разрывает вызов пополам, см.
+                # methodHandles.cpp k->initialize(CHECK_(empty)) -> `CHECK_(empty) })`).
                 c_last_ok = (c_ln is not None and 0 < c_col <= len(c_ln)
-                             and _is_reliable_stmt_end(c_ln[c_col - 1]))
+                             and _is_reliable_stmt_end(c_ln[c_col - 1])
+                             and (c_col >= len(c_ln) or c_ln[c_col] != ')'))
                 if (o_ln is not None and c_ln is not None
                         and 0 <= o_col <= len(o_ln) and 0 <= c_col <= len(c_ln)
                         and c_last_ok):

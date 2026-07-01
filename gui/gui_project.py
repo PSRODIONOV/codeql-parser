@@ -1330,13 +1330,15 @@ class DynamicTab(QWidget):
         # т.п.), что не совпадало бы с тем, что печатает coverage_report.py
         # в лог (см. dynamic/coverage_report.py).
         if t["fo_total"]:
+            fo_pct = 100 * t["fo_covered"] / t["fo_instrumented"] if t["fo_instrumented"] else 0
             self.fo_cov_lbl.setText(
-                f"{t['fo_covered']}/{t['fo_instrumented']} (всего по статике {t['fo_total']})")
+                f"{t['fo_covered']}/{t['fo_instrumented']} ({fo_pct:.1f}%) (всего по статике {t['fo_total']})")
         else:
             self.fo_cov_lbl.setText("—")
         if t["branch_total"]:
+            br_pct = 100 * t["branch_covered"] / t["branch_instrumented"] if t["branch_instrumented"] else 0
             self.br_cov_lbl.setText(
-                f"{t['branch_covered']}/{t['branch_instrumented']} (всего по статике {t['branch_total']})")
+                f"{t['branch_covered']}/{t['branch_instrumented']} ({br_pct:.1f}%) (всего по статике {t['branch_total']})")
         else:
             self.br_cov_lbl.setText("—")
 
@@ -1578,7 +1580,7 @@ class DynamicTab(QWidget):
                 return list(csv.reader(f, delimiter=";"))[1:]  # без заголовка
 
         fo = [(r[0], r[1], r[2]) for r in read("Покрытие_ФО.csv") if len(r) >= 3]
-        br = [(r[1], r[3], r[4], r[5], r[6], r[7]) for r in read("Покрытие_ветвей.csv") if len(r) >= 8]
+        br = [(r[1], r[3], r[4], r[5], r[6], r[10]) for r in read("Покрытие_ветвей.csv") if len(r) >= 11]
         summ = [(r[0], r[1], r[2], r[3], r[4]) for r in read("Сводка_покрытия.csv") if len(r) >= 5]
         self.proj.save_coverage(fo, br, summ)
 
@@ -1664,9 +1666,6 @@ class ProjectWindow(QMainWindow):
         if s.get("fo_total"): parts.append(f"ФО: {s['fo_total']}")
         if s.get("io_total"): parts.append(f"ИО: {s['io_total']}")
         if s.get("branches_total"): parts.append(f"ветвей: {s['branches_total']}")
-        cov = self.proj.coverage_totals()
-        if cov["fo_total"]:
-            parts.append(f"покрытие ФО: {cov['fo_covered']}/{cov['fo_total']}")
         self.stats_lbl.setText("   ".join(parts) or "Статистика появится после анализа")
 
     def _exit(self):
