@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import List, Optional
 
@@ -1147,6 +1148,7 @@ class DynamicTab(QWidget):
         self.win = window
         self.proj = window.proj
         self._worker: Optional[_Worker] = None
+        self._traces_tmp: Optional[str] = None
         self._build()
         self.refresh_gating()
 
@@ -1529,8 +1531,16 @@ class DynamicTab(QWidget):
             QMessageBox.warning(self, "Нет карты датчиков",
                                 "Сначала выполните инструментацию.")
             return
+        # Пишем пути трасс в temp-файл: при сотнях трасс с длинными Windows-путями
+        # раскрытие всех путей в командной строке превышает лимит 32K символов
+        # (WinError 206). --traces-file обходит это ограничение.
+        tf = tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         suffix=".txt", delete=False)
+        tf.write("\n".join(str(t) for t in traces))
+        tf.close()
+        self._traces_tmp = tf.name   # держим ссылку чтобы удалить в _coverage_done
         cmd = [sys.executable, str(ROOT / "dynamic" / "coverage_report.py"),
-               "--traces"] + [str(t) for t in traces] + [
+               "--traces-file", tf.name,
                "--reports", str(self.proj.reports_static),
                "--sensor-map", str(sensor_map),
                "--out", str(self.proj.reports_dynamic)]
@@ -1539,6 +1549,13 @@ class DynamicTab(QWidget):
         self._run_subprocess(cmd, self._coverage_done)
 
     def _coverage_done(self, ok, msg):
+        tmp = getattr(self, "_traces_tmp", None)
+        if tmp:
+            try:
+                Path(tmp).unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._traces_tmp = None
         if not ok:
             self.coverage_btn.setEnabled(True)
             self.log.append(f"❌ Ошибка покрытия: {msg}")

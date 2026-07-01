@@ -48,16 +48,26 @@ def read_csv(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--traces", nargs="+", required=True)
+    ap.add_argument("--traces", nargs="*", default=[])
+    ap.add_argument("--traces-file",
+                    help="Файл со списком трасс (по одному пути на строку); "
+                         "используется вместо --traces когда путей много")
     ap.add_argument("--reports", required=True)
     ap.add_argument("--sensor-map", required=True)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
+    if args.traces_file:
+        traces_list = Path(args.traces_file).read_text(encoding="utf-8").splitlines()
+    else:
+        traces_list = args.traces
+    if not traces_list:
+        ap.error("Укажите --traces или --traces-file")
+
     reports = Path(args.reports)
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
 
-    seen, tfiles = read_traces(args.traces)
+    seen, tfiles = read_traces(traces_list)
     print(f"Трасс прочитано: {len(tfiles)}, уникальных срабатываний: {len(seen)}")
 
     # Что было инструментировано (по карте датчиков). Читаем по ЗАГОЛОВКУ —
