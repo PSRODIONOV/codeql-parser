@@ -1330,13 +1330,13 @@ class DynamicTab(QWidget):
         # т.п.), что не совпадало бы с тем, что печатает coverage_report.py
         # в лог (см. dynamic/coverage_report.py).
         if t["fo_total"]:
-            fo_pct = 100 * t["fo_covered"] / t["fo_instrumented"] if t["fo_instrumented"] else 0
+            fo_pct = 100 * t["fo_covered"] / t["fo_total"]
             self.fo_cov_lbl.setText(
                 f"{t['fo_covered']}/{t['fo_instrumented']} ({fo_pct:.1f}%) (всего по статике {t['fo_total']})")
         else:
             self.fo_cov_lbl.setText("—")
         if t["branch_total"]:
-            br_pct = 100 * t["branch_covered"] / t["branch_instrumented"] if t["branch_instrumented"] else 0
+            br_pct = 100 * t["branch_covered"] / t["branch_total"]
             self.br_cov_lbl.setText(
                 f"{t['branch_covered']}/{t['branch_instrumented']} ({br_pct:.1f}%) (всего по статике {t['branch_total']})")
         else:
